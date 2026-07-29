@@ -315,13 +315,12 @@ final class AppModel: ObservableObject {
   }
 
   func openMessageFromNotification(_ id: String) async {
-    selection = .messages
+    messageNavigationRequestID = id
     if !isDemoMode {
       await loadMessages()
     }
     selectedMessageID = id
-    selectMessage(id)
-    messageNavigationRequestID = id
+    selection = .messages
   }
 
   func consumeMessageNavigationRequest(_ id: String) {

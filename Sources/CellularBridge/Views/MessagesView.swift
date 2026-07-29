@@ -7,12 +7,11 @@ struct MessagesView: View {
   @State private var query = ""
   @State private var drafts: [String: String] = [:]
   @State private var showingComposer = false
-  @State private var showingCompactDetail = false
+  @State private var columnVisibility: NavigationSplitViewVisibility = .all
+  @State private var preferredCompactColumn: NavigationSplitViewColumn = .content
   @State private var incomingDeleteCandidate: SMSMessage?
   @State private var outgoingDeleteCandidate: OutgoingSMS?
   @State private var outcomeUnknownRetryCandidate: OutgoingSMS?
-
-  private let compactLayoutThreshold: CGFloat = 650
 
   private var conversations: [SMSConversation] {
     SMSConversationBuilder.conversations(incoming: model.messages, outgoing: model.outbox)
@@ -35,67 +34,36 @@ struct MessagesView: View {
   }
 
   var body: some View {
-    GeometryReader { geometry in
-      let availableWidth = geometry.size.width
-      let usesCompactLayout = availableWidth < compactLayoutThreshold
-      let readRequest = conversationReadRequest(usesCompactLayout: usesCompactLayout)
-
-      content(availableWidth: availableWidth, usesCompactLayout: usesCompactLayout)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .toolbar {
-          ToolbarItem(placement: .navigation) {
-            if usesCompactLayout, showingCompactDetail {
-              Button {
-                showingCompactDetail = false
-              } label: {
-                Image(systemName: "chevron.left")
-              }
-              .help("返回会话列表")
-              .accessibilityLabel("返回会话列表")
-            }
-          }
-        }
-        .onAppear {
-          synchronizeSelection()
-          if !usesCompactLayout, selectedConversationID != nil {
-            showingCompactDetail = true
-          }
-          openRequestedMessage(model.messageNavigationRequestID)
-        }
-        .onChange(of: conversations.map(\.id)) { _, _ in
-          synchronizeSelection()
-        }
-        .task(id: readRequest) {
-          await handleConversationReadRequest(
-            readRequest,
-            usesCompactLayout: usesCompactLayout
-          )
-        }
-        .onChange(of: query) { _, _ in
-          synchronizeFilteredSelection()
-        }
-        .onChange(of: model.messageNavigationRequestID) { _, requestID in
-          openRequestedMessage(requestID)
-        }
-        .onChange(of: usesCompactLayout) { _, _ in
-          if selectedConversationID != nil {
-            showingCompactDetail = true
-          }
-        }
+    NavigationSplitView(
+      columnVisibility: $columnVisibility,
+      preferredCompactColumn: $preferredCompactColumn
+    ) {
+      AppSidebar()
+    } content: {
+      conversationList
+        .navigationSplitViewColumnWidth(min: 280, ideal: 320, max: 360)
+    } detail: {
+      conversationDetailColumn
+        .navigationSplitViewColumnWidth(min: 320, ideal: 520)
     }
-    .navigationTitle("短信")
-    .safeAreaInset(edge: .top, spacing: 0) {
-      if let issue = model.outgoingMessageIssue {
-        OutboxIssueBanner(issue: issue) {
-          model.clearOutgoingMessageIssue()
-        }
-      }
+    .navigationSplitViewStyle(.balanced)
+    .onAppear {
+      synchronizeSelectionUnlessNavigationIsPending()
+    }
+    .onChange(of: conversations.map(\.id)) { _, _ in
+      synchronizeSelectionUnlessNavigationIsPending()
+    }
+    .onChange(of: query) { _, _ in
+      synchronizeFilteredSelection()
+    }
+    .onChange(of: model.messageNavigationRequestID) { _, requestID in
+      openRequestedMessage(requestID)
     }
     .sheet(isPresented: $showingComposer) {
       ComposeMessageSheet { recipient in
         query = ""
         selectedConversationID = SMSConversationBuilder.canonicalAddress(recipient)
-        showingCompactDetail = true
+        preferredCompactColumn = .detail
       }
       .environmentObject(model)
     }
@@ -160,10 +128,11 @@ struct MessagesView: View {
     }
   }
 
-  @ViewBuilder
-  private func content(availableWidth: CGFloat, usesCompactLayout: Bool) -> some View {
-    if usesCompactLayout {
-      if showingCompactDetail, let selectedConversation {
+  private var conversationDetailColumn: some View {
+    let readRequest = conversationReadRequest
+
+    return Group {
+      if let selectedConversation {
         ConversationDetail(
           conversation: selectedConversation,
           draft: draftBinding(for: selectedConversation.id),
@@ -175,57 +144,49 @@ struct MessagesView: View {
           deleteOutgoing: { outgoingDeleteCandidate = $0 }
         )
       } else {
-        conversationList(compact: true)
-      }
-    } else {
-      HStack(spacing: 0) {
-        conversationList(compact: false)
-          .frame(width: conversationListWidth(for: availableWidth))
-
-        Divider()
-
-        Group {
-          if let selectedConversation {
-            ConversationDetail(
-              conversation: selectedConversation,
-              draft: draftBinding(for: selectedConversation.id),
-              isSending: model.isSendingMessage,
-              activeOutgoingMessageID: model.sendingOutgoingMessageID,
-              send: sendReply,
-              retry: requestRetry,
-              deleteIncoming: { incomingDeleteCandidate = $0 },
-              deleteOutgoing: { outgoingDeleteCandidate = $0 }
-            )
-          } else {
-            ContentUnavailableView("选择一条会话", systemImage: "message")
-          }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        ContentUnavailableView("选择一条会话", systemImage: "message")
       }
     }
-  }
-
-  private func conversationListWidth(for availableWidth: CGFloat) -> CGFloat {
-    min(340, max(300, availableWidth * 0.46))
-  }
-
-  private func conversationList(compact: Bool) -> some View {
-    VStack(spacing: 0) {
-      ConversationListHeader(
-        query: $query,
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
+    .navigationTitle("短信")
+    .toolbar {
+      RefreshToolbarActions(
         isRefreshing: model.isRefreshing,
-        compose: {
-          model.clearOutgoingMessageIssue()
-          showingComposer = true
-        },
+        refreshHelp: "检查新短信",
         refresh: {
           Task {
             await model.refresh()
             await model.refreshOutbox()
           }
+        },
+        secondarySystemImage: "square.and.pencil",
+        secondaryHelp: "写新短信",
+        isSecondaryDisabled: false,
+        secondaryAction: {
+          model.clearOutgoingMessageIssue()
+          showingComposer = true
         }
       )
-      Divider()
+    }
+    .safeAreaInset(edge: .top, spacing: 0) {
+      if let issue = model.outgoingMessageIssue {
+        OutboxIssueBanner(issue: issue) {
+          model.clearOutgoingMessageIssue()
+        }
+      }
+    }
+    .task(id: readRequest) {
+      await handleConversationReadRequest(readRequest)
+    }
+  }
+
+  private var conversationList: some View {
+    VStack(spacing: 0) {
+      NativeSearchField(text: $query, prompt: "搜索")
+        .controlSize(.extraLarge)
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
 
       if conversations.isEmpty {
         ContentUnavailableView {
@@ -244,36 +205,14 @@ struct MessagesView: View {
           systemImage: "magnifyingglass",
           description: Text("尝试其他号码或短信内容。")
         )
-      } else if compact {
-        List {
-          ForEach(Array(filteredConversations.enumerated()), id: \.element.id) {
-            index, conversation in
-            Button {
-              selectedConversationID = conversation.id
-              showingCompactDetail = true
-            } label: {
-              ConversationRow(
-                conversation: conversation,
-                isSelected: false,
-                showsSeparator: showsConversationSeparator(after: index, compact: true)
-              )
-              .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .listRowInsets(conversationRowInsets)
-            .listRowSeparator(.hidden)
-          }
-        }
-        .listStyle(.sidebar)
-        .scrollContentBackground(.hidden)
       } else {
-        List(selection: $selectedConversationID) {
+        List(selection: conversationSelection) {
           ForEach(Array(filteredConversations.enumerated()), id: \.element.id) {
             index, conversation in
             ConversationRow(
               conversation: conversation,
               isSelected: conversation.id == selectedConversationID,
-              showsSeparator: showsConversationSeparator(after: index, compact: false)
+              showsSeparator: showsConversationSeparator(after: index)
             )
             .tag(conversation.id)
             .listRowInsets(conversationRowInsets)
@@ -284,16 +223,16 @@ struct MessagesView: View {
         .scrollContentBackground(.hidden)
       }
     }
-    .background(Color(nsColor: .windowBackgroundColor))
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
   }
 
   private var conversationRowInsets: EdgeInsets {
     EdgeInsets(top: 0, leading: 13, bottom: 0, trailing: 5)
   }
 
-  private func showsConversationSeparator(after index: Int, compact: Bool) -> Bool {
+  private func showsConversationSeparator(after index: Int) -> Bool {
     guard filteredConversations.indices.contains(index + 1) else { return false }
-    guard !compact, let selectedConversationID else { return true }
+    guard let selectedConversationID else { return true }
     return filteredConversations[index].id != selectedConversationID
       && filteredConversations[index + 1].id != selectedConversationID
   }
@@ -325,30 +264,23 @@ struct MessagesView: View {
     {
       return
     }
-    selectedConversationID = filteredConversations.first?.id
+    selectedConversationID = nil
   }
 
-  private func isConversationDetailVisible(usesCompactLayout: Bool) -> Bool {
-    !usesCompactLayout || showingCompactDetail
-  }
-
-  private func conversationReadRequest(usesCompactLayout: Bool) -> ConversationReadRequest {
+  private var conversationReadRequest: ConversationReadRequest {
     ConversationReadRequest(
       conversationID: selectedConversation?.id,
       messageIDs: selectedConversation?.incomingMessageIDs ?? [],
-      isVisible: isConversationDetailVisible(usesCompactLayout: usesCompactLayout)
+      isEnabled: model.messageNavigationRequestID == nil
     )
   }
 
-  private func handleConversationReadRequest(
-    _ request: ConversationReadRequest,
-    usesCompactLayout: Bool
-  ) async {
-    guard request.isVisible, request.conversationID != nil else { return }
+  private func handleConversationReadRequest(_ request: ConversationReadRequest) async {
+    guard request.isEnabled, request.conversationID != nil else { return }
 
     await Task.yield()
     guard !Task.isCancelled,
-      request == conversationReadRequest(usesCompactLayout: usesCompactLayout)
+      request == conversationReadRequest
     else { return }
 
     model.selectConversation(messageIDs: request.messageIDs)
@@ -362,8 +294,28 @@ struct MessagesView: View {
     else { return }
     query = ""
     selectedConversationID = conversation.id
-    showingCompactDetail = true
+    preferredCompactColumn = .detail
     model.consumeMessageNavigationRequest(requestID)
+  }
+
+  private func synchronizeSelectionUnlessNavigationIsPending() {
+    let requestID = model.messageNavigationRequestID
+    openRequestedMessage(requestID)
+    if requestID == nil {
+      synchronizeSelection()
+    }
+  }
+
+  private var conversationSelection: Binding<String?> {
+    Binding(
+      get: { selectedConversationID },
+      set: { conversationID in
+        selectedConversationID = conversationID
+        if conversationID != nil {
+          preferredCompactColumn = .detail
+        }
+      }
+    )
   }
 
   private func draftBinding(for conversationID: String) -> Binding<String> {
@@ -397,60 +349,7 @@ struct MessagesView: View {
 private struct ConversationReadRequest: Equatable {
   let conversationID: String?
   let messageIDs: [String]
-  let isVisible: Bool
-}
-
-private struct ConversationListHeader: View {
-  @Binding var query: String
-  let isRefreshing: Bool
-  let compose: () -> Void
-  let refresh: () -> Void
-
-  var body: some View {
-    VStack(spacing: 10) {
-      HStack {
-        Text("信息")
-          .font(.title2.weight(.semibold))
-        Spacer()
-        Button(action: refresh) {
-          Image(systemName: "arrow.clockwise")
-        }
-        .disabled(isRefreshing)
-        .help("检查新短信")
-        .accessibilityLabel("检查新短信")
-
-        Button(action: compose) {
-          Image(systemName: "square.and.pencil")
-        }
-        .help("新短信")
-        .accessibilityLabel("新短信")
-      }
-
-      HStack(spacing: 7) {
-        Image(systemName: "magnifyingglass")
-          .foregroundStyle(.secondary)
-        TextField("搜索", text: $query)
-          .textFieldStyle(.plain)
-        if !query.isEmpty {
-          Button {
-            query = ""
-          } label: {
-            Image(systemName: "xmark.circle.fill")
-          }
-          .buttonStyle(.plain)
-          .foregroundStyle(.secondary)
-          .help("清除搜索")
-          .accessibilityLabel("清除搜索")
-        }
-      }
-      .padding(.horizontal, 9)
-      .frame(height: 30)
-      .background(.quaternary, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-    }
-    .padding(.horizontal, 12)
-    .padding(.top, 10)
-    .padding(.bottom, 12)
-  }
+  let isEnabled: Bool
 }
 
 private struct ConversationRow: View {
@@ -573,7 +472,6 @@ private struct ConversationDetail: View {
   var body: some View {
     VStack(spacing: 0) {
       ConversationHeader(conversation: conversation)
-      Divider()
       ConversationTimeline(
         conversation: conversation,
         isSending: isSending,
@@ -583,7 +481,6 @@ private struct ConversationDetail: View {
         deleteOutgoing: deleteOutgoing
       )
       .id(conversation.id)
-      Divider()
       ConversationReplyBar(
         draft: $draft,
         recipient: conversation.displayAddress,
@@ -591,7 +488,6 @@ private struct ConversationDetail: View {
         send: send
       )
     }
-    .background(Color(nsColor: .textBackgroundColor))
   }
 }
 
@@ -599,18 +495,16 @@ private struct ConversationHeader: View {
   let conversation: SMSConversation
 
   var body: some View {
-    VStack(spacing: 5) {
-      ConversationAvatar(address: conversation.displayAddress, size: 36)
+    VStack(spacing: 4) {
+      ConversationAvatar(address: conversation.displayAddress, size: 40)
       Text(SMSAddressDisplayFormatter.string(for: conversation.displayAddress))
         .font(.callout.weight(.semibold))
+        .lineLimit(1)
+        .minimumScaleFactor(0.85)
         .textSelection(.enabled)
-      Text("短信")
-        .font(.caption)
-        .foregroundStyle(.secondary)
     }
     .frame(maxWidth: .infinity)
-    .frame(height: 86)
-    .background(.bar)
+    .frame(height: 64)
   }
 }
 
@@ -632,7 +526,16 @@ private struct ConversationTimeline: View {
         ScrollView {
           LazyVStack(spacing: 7) {
             ForEach(Array(conversation.entries.enumerated()), id: \.element.id) { index, entry in
-              if showsTimestamp(before: index) {
+              if index == 0 {
+                VStack(spacing: 0) {
+                  Text("信息 • 短信")
+                  Text(ConversationDateFormatter.string(for: entry.timestamp))
+                }
+                .font(.caption2.weight(.medium))
+                .foregroundStyle(.tertiary)
+                .padding(.top, 2)
+                .padding(.bottom, 3)
+              } else if showsTimestamp(before: index) {
                 Text(ConversationDateFormatter.string(for: entry.timestamp))
                   .font(.caption.weight(.medium))
                   .foregroundStyle(.tertiary)
@@ -865,55 +768,59 @@ private struct ConversationReplyBar: View {
           .lineLimit(2)
       }
 
-      HStack(alignment: .bottom, spacing: 8) {
-        TextField("短信", text: $draft, axis: .vertical)
+      HStack(alignment: .bottom, spacing: 4) {
+        TextField("信息 • 短信", text: $draft, axis: .vertical)
           .textFieldStyle(.plain)
           .lineLimit(1...4)
           .focused($isFocused)
-          .padding(.horizontal, 12)
-          .padding(.vertical, 8)
-          .background(
-            Color(nsColor: .controlBackgroundColor),
-            in: RoundedRectangle(cornerRadius: 16, style: .continuous)
-          )
-          .overlay {
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-              .stroke(Color(nsColor: .separatorColor))
-          }
           .onSubmit(submit)
 
-        Button(action: submit) {
-          if isSending {
-            ProgressView()
-              .controlSize(.small)
-              .frame(width: 26, height: 26)
-          } else {
-            Image(systemName: "arrow.up.circle.fill")
-              .font(.system(size: 25))
-          }
+        if isSending {
+          ProgressView()
+            .controlSize(.small)
+            .frame(width: 26, height: 26)
         }
-        .buttonStyle(.plain)
-        .foregroundStyle(analysis.canSend ? Color.accentColor : Color.secondary)
-        .disabled(!analysis.canSend)
-        .help("发送")
-        .accessibilityLabel("发送")
       }
-
-      if !draft.isEmpty {
-        Text(analysis.encodingDescription)
-          .font(.caption2.monospacedDigit())
-          .foregroundStyle(.tertiary)
-          .padding(.leading, 12)
-      }
+      .padding(.horizontal, 11)
+      .padding(.vertical, 5)
+      .frame(minHeight: 31)
+      .modifier(ComposerGlassBackground())
+      .help(analysis.encodingDescription)
     }
     .padding(.horizontal, 12)
-    .padding(.vertical, 10)
-    .background(.bar)
+    .padding(.vertical, 8)
   }
 
   private func submit() {
     guard analysis.canSend else { return }
     send(recipient, draft)
+  }
+}
+
+private struct ComposerGlassBackground: ViewModifier {
+  @ViewBuilder
+  func body(content: Content) -> some View {
+    if #available(macOS 26, *) {
+      content
+        .background(
+          Color.primary.opacity(0.038),
+          in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+        )
+        .glassEffect(
+          .regular,
+          in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+        )
+    } else {
+      content
+        .background(
+          .regularMaterial,
+          in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+        )
+        .overlay {
+          RoundedRectangle(cornerRadius: 16, style: .continuous)
+            .stroke(Color(nsColor: .separatorColor).opacity(0.35))
+        }
+    }
   }
 }
 

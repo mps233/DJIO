@@ -86,39 +86,22 @@ struct ConnectionView: View {
       }
     }
     .formStyle(.grouped)
+    .scrollContentBackground(.hidden)
     .padding(18)
     .navigationTitle("连接")
     .toolbar {
-      ToolbarItemGroup {
-        Button {
-          Task { await model.refresh() }
-        } label: {
-          Group {
-            if model.isRefreshing {
-              ProgressView()
-                .controlSize(.small)
-            } else {
-              Image(systemName: "arrow.clockwise")
-            }
-          }
-          .frame(width: 16, height: 16)
-        }
-        .disabled(model.isRefreshing)
-        .help("刷新连接状态")
-        .accessibilityLabel("刷新连接状态")
-
-        Button {
+      RefreshToolbarActions(
+        isRefreshing: model.isRefreshing,
+        refreshHelp: "刷新连接状态",
+        refresh: { Task { await model.refresh() } },
+        secondarySystemImage: "arrow.triangle.2.circlepath",
+        secondaryHelp: "切换到 ECM",
+        isSecondaryDisabled: model.isSwitchingMode || model.isRefreshing || model.isSendingMessage
+          || model.connection.control == .unavailable,
+        secondaryAction: {
           model.showingModeConfirmation = true
-        } label: {
-          Image(systemName: "arrow.triangle.2.circlepath")
         }
-        .disabled(
-          model.isSwitchingMode || model.isRefreshing || model.isSendingMessage
-            || model.connection.control == .unavailable
-        )
-        .help("切换到 ECM")
-        .accessibilityLabel("切换到 ECM")
-      }
+      )
     }
     .confirmationDialog(
       "切换到 ECM 模式？",

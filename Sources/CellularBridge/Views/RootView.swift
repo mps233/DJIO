@@ -1,59 +1,72 @@
+import AppKit
 import SwiftUI
 
 struct RootView: View {
   @EnvironmentObject private var model: AppModel
-  @State private var columnVisibility: NavigationSplitViewVisibility = .all
+  @State private var connectionColumnVisibility: NavigationSplitViewVisibility = .all
 
   var body: some View {
-    NavigationSplitView(columnVisibility: $columnVisibility) {
-      List(selection: $model.selection) {
-        Section {
-          ForEach(NavigationDestination.allCases) { destination in
-            Label {
-              HStack {
-                Text(destination.title)
-                Spacer()
-                if destination == .messages, model.unreadCount > 0 {
-                  Text("\(model.unreadCount)")
-                    .font(.caption.monospacedDigit().weight(.semibold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 6)
-                    .frame(minHeight: 18)
-                    .background(.red, in: Capsule())
-                }
-              }
-            } icon: {
-              Image(systemName: destination.systemImage)
-            }
-            .tag(destination)
-          }
-        }
-
-        Section("当前链路") {
-          SidebarStatusRow(label: "ECM", condition: model.connection.ecm)
-          SidebarStatusRow(label: "短信", condition: model.connection.control)
-        }
-      }
-      .listStyle(.sidebar)
-      .navigationTitle("蜂窝桥")
-      .navigationSplitViewColumnWidth(min: 180, ideal: 210, max: 245)
-      .safeAreaInset(edge: .bottom) {
-        if model.isDemoMode {
-          Label("演示模式", systemImage: "play.rectangle")
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .padding(.vertical, 10)
-        }
-      }
-    } detail: {
+    Group {
       switch model.selection ?? .connection {
       case .connection:
-        ConnectionView()
+        NavigationSplitView(columnVisibility: $connectionColumnVisibility) {
+          AppSidebar()
+        } detail: {
+          ConnectionView()
+        }
+        .navigationSplitViewStyle(.balanced)
       case .messages:
         MessagesView()
       }
     }
-    .navigationSplitViewStyle(.balanced)
+    .background(Color(nsColor: .windowBackgroundColor).ignoresSafeArea())
+    .toolbarBackground(.hidden, for: .windowToolbar)
+  }
+}
+
+struct AppSidebar: View {
+  @EnvironmentObject private var model: AppModel
+
+  var body: some View {
+    List(selection: $model.selection) {
+      Section {
+        ForEach(NavigationDestination.allCases) { destination in
+          Label {
+            HStack {
+              Text(destination.title)
+              Spacer()
+              if destination == .messages, model.unreadCount > 0 {
+                Text("\(model.unreadCount)")
+                  .font(.caption.monospacedDigit().weight(.semibold))
+                  .foregroundStyle(.white)
+                  .padding(.horizontal, 6)
+                  .frame(minHeight: 18)
+                  .background(.red, in: Capsule())
+              }
+            }
+          } icon: {
+            Image(systemName: destination.systemImage)
+          }
+          .tag(destination)
+        }
+      }
+
+      Section("当前链路") {
+        SidebarStatusRow(label: "ECM", condition: model.connection.ecm)
+        SidebarStatusRow(label: "短信", condition: model.connection.control)
+      }
+    }
+    .listStyle(.sidebar)
+    .navigationTitle("蜂窝桥")
+    .navigationSplitViewColumnWidth(min: 180, ideal: 210, max: 245)
+    .safeAreaInset(edge: .bottom) {
+      if model.isDemoMode {
+        Label("演示模式", systemImage: "play.rectangle")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+          .padding(.vertical, 10)
+      }
+    }
   }
 }
 

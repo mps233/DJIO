@@ -75,7 +75,7 @@ struct CellularBridgeApp: App {
         .background {
           NotificationNavigationBridge(model: model, appDelegate: appDelegate)
         }
-        .frame(minWidth: 640, minHeight: 520)
+        .frame(minWidth: 860, minHeight: 520)
         .task { model.start() }
     }
     .defaultSize(width: 1_020, height: 680)
