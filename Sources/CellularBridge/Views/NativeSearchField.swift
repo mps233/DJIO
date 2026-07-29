@@ -10,7 +10,7 @@ struct NativeSearchField: NSViewRepresentable {
   }
 
   func makeNSView(context: Context) -> NSSearchField {
-    let searchField = NSSearchField()
+    let searchField = MessageSearchField()
     searchField.placeholderString = prompt
     searchField.controlSize = .extraLarge
     searchField.delegate = context.coordinator
@@ -60,5 +60,19 @@ struct NativeSearchField: NSViewRepresentable {
         text.wrappedValue = searchField.stringValue
       }
     }
+  }
+}
+
+private final class MessageSearchField: NSSearchField {
+  override func draw(_ dirtyRect: NSRect) {
+    super.draw(dirtyRect)
+
+    NSColor(deviceRed: 46 / 255, green: 44 / 255, blue: 45 / 255, alpha: 1).setFill()
+    NSBezierPath(
+      roundedRect: bounds,
+      xRadius: bounds.height / 2,
+      yRadius: bounds.height / 2
+    ).fill()
+    cell?.drawInterior(withFrame: bounds, in: self)
   }
 }

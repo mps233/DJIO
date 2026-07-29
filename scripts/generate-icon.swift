@@ -28,6 +28,18 @@ func color(_ red: CGFloat, _ green: CGFloat, _ blue: CGFloat, alpha: CGFloat = 1
     CGColor(red: red / 255, green: green / 255, blue: blue / 255, alpha: alpha)
 }
 
+func gradient(
+    colors: [CGColor],
+    locations: [CGFloat]? = nil
+) throws -> CGGradient {
+    guard let gradient = CGGradient(
+        colorsSpace: CGColorSpaceCreateDeviceRGB(),
+        colors: colors as CFArray,
+        locations: locations
+    ) else { throw CocoaError(.fileWriteUnknown) }
+    return gradient
+}
+
 func renderIcon(pixels: Int) throws -> Data {
     let colorSpace = CGColorSpaceCreateDeviceRGB()
     guard let context = CGContext(
@@ -43,58 +55,198 @@ func renderIcon(pixels: Int) throws -> Data {
     let scale = CGFloat(pixels) / 1024
     context.clear(CGRect(x: 0, y: 0, width: pixels, height: pixels))
 
-    let tileRect = CGRect(x: 66 * scale, y: 66 * scale, width: 892 * scale, height: 892 * scale)
-    context.addPath(CGPath(roundedRect: tileRect, cornerWidth: 210 * scale, cornerHeight: 210 * scale, transform: nil))
-    context.setFillColor(color(31, 35, 39))
-    context.fillPath()
+    let tileRect = CGRect(x: 68 * scale, y: 68 * scale, width: 888 * scale, height: 888 * scale)
+    let tilePath = CGPath(
+        roundedRect: tileRect,
+        cornerWidth: 220 * scale,
+        cornerHeight: 220 * scale,
+        transform: nil
+    )
 
-    context.setStrokeColor(color(90, 99, 108))
-    context.setLineWidth(max(2, 24 * scale))
-    context.setLineCap(.round)
-    context.move(to: CGPoint(x: 254 * scale, y: 510 * scale))
-    context.addLine(to: CGPoint(x: 770 * scale, y: 510 * scale))
+    context.saveGState()
+    context.setShadow(
+        offset: CGSize(width: 0, height: -18 * scale),
+        blur: 34 * scale,
+        color: color(0, 0, 0, alpha: 0.34)
+    )
+    context.addPath(tilePath)
+    context.setFillColor(color(16, 48, 48))
+    context.fillPath()
+    context.restoreGState()
+
+    context.saveGState()
+    context.addPath(tilePath)
+    context.clip()
+
+    let baseGradient = try gradient(
+        colors: [
+            color(17, 61, 57),
+            color(20, 116, 120),
+            color(57, 103, 174),
+        ],
+        locations: [0, 0.48, 1]
+    )
+    context.drawLinearGradient(
+        baseGradient,
+        start: CGPoint(x: 130 * scale, y: 130 * scale),
+        end: CGPoint(x: 900 * scale, y: 910 * scale),
+        options: []
+    )
+
+    context.setBlendMode(.screen)
+    let warmGlow = try gradient(
+        colors: [
+            color(242, 168, 93, alpha: 0.78),
+            color(242, 168, 93, alpha: 0),
+        ],
+        locations: [0, 1]
+    )
+    context.drawRadialGradient(
+        warmGlow,
+        startCenter: CGPoint(x: 210 * scale, y: 204 * scale),
+        startRadius: 0,
+        endCenter: CGPoint(x: 210 * scale, y: 204 * scale),
+        endRadius: 500 * scale,
+        options: [.drawsAfterEndLocation]
+    )
+
+    let coolGlow = try gradient(
+        colors: [
+            color(92, 229, 211, alpha: 0.54),
+            color(92, 229, 211, alpha: 0),
+        ],
+        locations: [0, 1]
+    )
+    context.drawRadialGradient(
+        coolGlow,
+        startCenter: CGPoint(x: 816 * scale, y: 806 * scale),
+        startRadius: 0,
+        endCenter: CGPoint(x: 816 * scale, y: 806 * scale),
+        endRadius: 510 * scale,
+        options: [.drawsAfterEndLocation]
+    )
+    context.restoreGState()
+
+    context.saveGState()
+    context.addPath(tilePath)
+    context.setStrokeColor(color(255, 255, 255, alpha: 0.26))
+    context.setLineWidth(max(1, 5 * scale))
     context.strokePath()
 
-    let centers: [CGFloat] = [254, 426, 598, 770]
-    let fills = [
-        color(240, 244, 247),
-        color(72, 145, 255),
-        color(57, 199, 190),
-        color(48, 209, 88),
-    ]
-    for (index, center) in centers.enumerated() {
-        let radius = 64 * scale
-        context.setFillColor(fills[index])
-        context.fillEllipse(in: CGRect(
-            x: center * scale - radius,
-            y: 510 * scale - radius,
-            width: radius * 2,
-            height: radius * 2
-        ))
+    let insetRect = tileRect.insetBy(dx: 42 * scale, dy: 42 * scale)
+    context.addPath(CGPath(
+        roundedRect: insetRect,
+        cornerWidth: 180 * scale,
+        cornerHeight: 180 * scale,
+        transform: nil
+    ))
+    context.setStrokeColor(color(255, 255, 255, alpha: 0.09))
+    context.setLineWidth(max(1, 3 * scale))
+    context.strokePath()
+    context.restoreGState()
 
-        let coreRadius = max(1, 18 * scale)
-        context.setFillColor(color(31, 35, 39, alpha: index == 0 ? 0.75 : 0.9))
-        context.fillEllipse(in: CGRect(
-            x: center * scale - coreRadius,
-            y: 510 * scale - coreRadius,
-            width: coreRadius * 2,
-            height: coreRadius * 2
-        ))
+    let bars: [(x: CGFloat, height: CGFloat, fill: CGColor)] = [
+        (341, 112, color(251, 189, 112, alpha: 0.92)),
+        (433, 172, color(172, 232, 173, alpha: 0.92)),
+        (525, 238, color(105, 224, 205, alpha: 0.94)),
+        (617, 310, color(117, 194, 249, alpha: 0.94)),
+    ]
+    for bar in bars {
+        let barRect = CGRect(
+            x: bar.x * scale,
+            y: 256 * scale,
+            width: 66 * scale,
+            height: bar.height * scale
+        )
+        let barPath = CGPath(
+            roundedRect: barRect,
+            cornerWidth: 33 * scale,
+            cornerHeight: 33 * scale,
+            transform: nil
+        )
+        context.saveGState()
+        context.setShadow(
+            offset: CGSize(width: 0, height: 8 * scale),
+            blur: 22 * scale,
+            color: bar.fill.copy(alpha: 0.38)
+        )
+        context.addPath(barPath)
+        context.setFillColor(bar.fill)
+        context.fillPath()
+        context.restoreGState()
+
+        context.addPath(barPath)
+        context.setStrokeColor(color(255, 255, 255, alpha: 0.34))
+        context.setLineWidth(max(1, 3 * scale))
+        context.strokePath()
     }
 
-    context.setStrokeColor(color(48, 209, 88, alpha: 0.9))
-    context.setLineWidth(max(2, 18 * scale))
+    let bridgePath = CGMutablePath()
+    bridgePath.move(to: CGPoint(x: 284 * scale, y: 556 * scale))
+    bridgePath.addCurve(
+        to: CGPoint(x: 740 * scale, y: 556 * scale),
+        control1: CGPoint(x: 390 * scale, y: 766 * scale),
+        control2: CGPoint(x: 634 * scale, y: 766 * scale)
+    )
+
+    context.saveGState()
     context.setLineCap(.round)
-    let radioCenter = CGPoint(x: 770 * scale, y: 510 * scale)
-    for radius in [96, 142, 188] as [CGFloat] {
-        context.addArc(
-            center: radioCenter,
-            radius: radius * scale,
-            startAngle: -0.62,
-            endAngle: 0.62,
-            clockwise: false
+    context.setShadow(
+        offset: CGSize(width: 0, height: -12 * scale),
+        blur: 30 * scale,
+        color: color(11, 43, 57, alpha: 0.42)
+    )
+    context.addPath(bridgePath)
+    context.setStrokeColor(color(218, 249, 246, alpha: 0.54))
+    context.setLineWidth(max(2, 92 * scale))
+    context.strokePath()
+    context.restoreGState()
+
+    context.saveGState()
+    context.setBlendMode(.screen)
+    context.setLineCap(.round)
+    context.addPath(bridgePath)
+    context.setStrokeColor(color(255, 255, 255, alpha: 0.52))
+    context.setLineWidth(max(1, 12 * scale))
+    context.strokePath()
+    context.restoreGState()
+
+    for x in [240, 696] as [CGFloat] {
+        let pillarRect = CGRect(
+            x: x * scale,
+            y: 238 * scale,
+            width: 88 * scale,
+            height: 342 * scale
         )
+        let pillarPath = CGPath(
+            roundedRect: pillarRect,
+            cornerWidth: 44 * scale,
+            cornerHeight: 44 * scale,
+            transform: nil
+        )
+        context.saveGState()
+        context.setShadow(
+            offset: CGSize(width: 0, height: -10 * scale),
+            blur: 24 * scale,
+            color: color(8, 38, 49, alpha: 0.4)
+        )
+        context.addPath(pillarPath)
+        context.setFillColor(color(225, 251, 248, alpha: 0.48))
+        context.fillPath()
+        context.restoreGState()
+
+        context.addPath(pillarPath)
+        context.setStrokeColor(color(255, 255, 255, alpha: 0.48))
+        context.setLineWidth(max(1, 4 * scale))
         context.strokePath()
+
+        context.setFillColor(color(255, 255, 255, alpha: 0.52))
+        context.fillEllipse(in: CGRect(
+            x: (x + 35) * scale,
+            y: 518 * scale,
+            width: 18 * scale,
+            height: 18 * scale
+        ))
     }
 
     guard let image = context.makeImage() else { throw CocoaError(.fileWriteUnknown) }

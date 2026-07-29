@@ -8,8 +8,6 @@
     <string>蜂窝桥</string>
     <key>CFBundleExecutable</key>
     <string>CellularBridge</string>
-    <key>CFBundleIconFile</key>
-    <string>AppIcon</string>
     <key>CFBundleIdentifier</key>
     <string>com.local.CellularBridge</string>
     <key>CFBundleInfoDictionaryVersion</key>
