@@ -1,17 +1,17 @@
 {
   "fill" : {
-    "automatic-gradient" : "extended-srgb:0.00000,0.53333,1.00000,1.00000"
+    "automatic-gradient" : "extended-srgb:0.03137,0.12549,0.16471,1.00000"
   },
   "groups" : [
     {
       "layers" : [
         {
           "glass" : false,
-          "image-name" : "ProvidedIcon.png",
-          "name" : "ProvidedIcon"
+          "image-name" : "AmbientGlow.png",
+          "name" : "Ambient Glow"
         }
       ],
-      "name" : "Provided Artwork",
+      "name" : "Ambient Light",
       "shadow" : {
         "kind" : "none",
         "opacity" : 0.5
@@ -20,6 +20,25 @@
       "translucency" : {
         "enabled" : false,
         "value" : 0.5
+      }
+    },
+    {
+      "layers" : [
+        {
+          "glass" : true,
+          "image-name" : "SignalBars.png",
+          "name" : "Signal Bars"
+        }
+      ],
+      "name" : "Cellular Signal",
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.42
+      },
+      "specular" : true,
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.18
       }
     }
   ],
