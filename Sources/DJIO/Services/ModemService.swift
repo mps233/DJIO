@@ -25,8 +25,8 @@ actor ModemService {
   }
 
   static let supportedUSBDevices = [
-    USBDeviceIdentifier(vendorID: 0x2C7C, productID: 0x0125),
-    USBDeviceIdentifier(vendorID: 0x2CA3, productID: 0x4006),
+    USBDeviceIdentifier.quectelEC25,
+    USBDeviceIdentifier.djiFirstGenerationFactory,
   ]
 
   private let transport: any ATTransporting
@@ -186,12 +186,18 @@ actor ModemService {
     try await database.delete(id: id)
   }
 
-  func switchToECM(apn: String?) async throws {
+  func switchToECM(
+    apn: String?,
+    allowFactoryIdentityRewrite: Bool
+  ) async throws -> ECMModeSwitchResult {
     await acquireTransportOperation()
     defer { releaseTransportOperation() }
     try Task.checkCancellation()
     do {
-      try await switchToECMExclusively(apn: apn)
+      return try await switchToECMExclusively(
+        apn: apn,
+        allowFactoryIdentityRewrite: allowFactoryIdentityRewrite
+      )
     } catch {
       resetInitializationAfterTransportFailure(error)
       throw error
@@ -201,6 +207,10 @@ actor ModemService {
   func disconnect() async {
     await acquireTransportOperation()
     defer { releaseTransportOperation() }
+    await disconnectExclusively()
+  }
+
+  private func disconnectExclusively() async {
     await transport.disconnect()
     initializedDescriptor = nil
     hasCompletedMessageScan = false
@@ -695,9 +705,17 @@ actor ModemService {
     return try? await outbox.markFailed(id: id, error: error.localizedDescription)
   }
 
-  private func switchToECMExclusively(apn: String?) async throws {
+  private func switchToECMExclusively(
+    apn: String?,
+    allowFactoryIdentityRewrite: Bool
+  ) async throws -> ECMModeSwitchResult {
     let descriptor = try await ensureConnected()
     try await initializeIfNeeded(descriptor: descriptor)
+    let rewritesUSBIdentity =
+      descriptor.usbDeviceIdentifier == .djiFirstGenerationFactory
+    guard !rewritesUSBIdentity || allowFactoryIdentityRewrite else {
+      throw ECMModeSwitchError.factoryIdentityRewriteNotAuthorized
+    }
     if let apn, !apn.isEmpty {
       guard Self.isSafeAPN(apn) else {
         throw ModemTransportError.invalidCommand("APN 只能包含字母、数字、点、连字符和下划线")
@@ -706,23 +724,79 @@ actor ModemService {
         ATCommand("AT+CGDCONT=1,\"IP\",\"\(apn)\"", timeout: 5)
       ])
     }
+
     do {
-      _ = try await transport.perform([
-        ATCommand("AT+QCFG=\"usbnet\",1", timeout: 8)
-      ])
-    } catch ModemTransportError.disconnected {
-      // This firmware hot-restarts USB as soon as the new mode is accepted.
-    } catch ModemTransportError.timeout {
-      // The final OK can be lost while the device is re-enumerating.
+      var identityRewriteAccepted = false
+      if rewritesUSBIdentity {
+        do {
+          _ = try await transport.perform([
+            ATCommand(
+              "AT+QCFG=\"usbcfg\",0x2C7C,0x0125,1,1,1,1,1,0,0",
+              timeout: 8
+            )
+          ])
+          identityRewriteAccepted = true
+        } catch {
+          if Self.hasUnknownCommandOutcome(error) {
+            throw ECMModeSwitchError.identityRewriteOutcomeUnknown(
+              error.localizedDescription
+            )
+          }
+          throw error
+        }
+      }
+
+      var restartHasStarted = false
+      do {
+        _ = try await transport.perform([
+          ATCommand("AT+QCFG=\"usbnet\",1", timeout: 8)
+        ])
+      } catch {
+        if Self.isUSBDisconnect(error) {
+          restartHasStarted = true
+        } else if Self.isTimeout(error) {
+          throw ECMModeSwitchError.modeSwitchOutcomeUnknown(
+            identityRewriteAccepted: identityRewriteAccepted,
+            detail: error.localizedDescription
+          )
+        } else if identityRewriteAccepted {
+          throw ECMModeSwitchError.identityRewriteAcceptedButModeSwitchFailed(
+            error.localizedDescription
+          )
+        } else {
+          throw error
+        }
+      }
+
+      if !restartHasStarted {
+        do {
+          _ = try await transport.perform([
+            ATCommand("AT+CFUN=1,1", timeout: 8)
+          ])
+        } catch {
+          if Self.isUSBDisconnect(error) {
+            restartHasStarted = true
+          } else if Self.isTimeout(error) {
+            throw ECMModeSwitchError.modeSwitchOutcomeUnknown(
+              identityRewriteAccepted: identityRewriteAccepted,
+              detail: error.localizedDescription
+            )
+          } else if identityRewriteAccepted {
+            throw ECMModeSwitchError.identityRewriteAcceptedButModeSwitchFailed(
+              error.localizedDescription
+            )
+          } else {
+            throw error
+          }
+        }
+      }
+
+      await disconnectExclusively()
+      return ECMModeSwitchResult(didRewriteUSBIdentity: identityRewriteAccepted)
+    } catch {
+      await disconnectExclusively()
+      throw error
     }
-    await transport.disconnect()
-    initializedDescriptor = nil
-    hasCompletedMessageScan = false
-    lastInboxReconciliationAt = nil
-    cachedIncomingParts.removeAll()
-    announcedIncomingAt.removeAll()
-    activeIncomingCall = nil
-    resetCachedFirmware()
   }
 
   private func optionalStatusResponse(_ command: ATCommand) async throws -> String? {
@@ -907,5 +981,26 @@ actor ModemService {
       && value.allSatisfy {
         $0.isASCII && ($0.isLetter || $0.isNumber || ".-_".contains($0))
       }
+  }
+
+  private static func isUSBDisconnect(_ error: any Error) -> Bool {
+    guard let transportError = error as? ModemTransportError else { return false }
+    if case .disconnected = transportError { return true }
+    return false
+  }
+
+  private static func isTimeout(_ error: any Error) -> Bool {
+    guard let transportError = error as? ModemTransportError else { return false }
+    if case .timeout = transportError { return true }
+    return false
+  }
+
+  private static func hasUnknownCommandOutcome(_ error: any Error) -> Bool {
+    guard let transportError = error as? ModemTransportError else { return true }
+    switch transportError {
+    case .timeout, .disconnected, .io: return true
+    case .notConnected, .modemRejected, .invalidCommand, .submissionOutcomeUnknown:
+      return false
+    }
   }
 }

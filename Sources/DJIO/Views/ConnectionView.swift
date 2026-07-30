@@ -95,7 +95,7 @@ struct ConnectionView: View {
         refreshHelp: "刷新连接状态",
         refresh: { Task { await model.refresh() } },
         secondarySystemImage: "arrow.triangle.2.circlepath",
-        secondaryHelp: "切换到 ECM",
+        secondaryHelp: rewritesUSBIdentity ? "转换 USB 身份并配置 ECM" : "切换到 ECM",
         isSecondaryDisabled: model.isSwitchingMode || model.isRefreshing || model.isSendingMessage
           || model.connection.control == .unavailable,
         secondaryAction: {
@@ -104,17 +104,35 @@ struct ConnectionView: View {
       )
     }
     .confirmationDialog(
-      "切换到 ECM 模式？",
+      rewritesUSBIdentity ? "转换大疆模块并启用 ECM？" : "切换到 ECM 模式？",
       isPresented: $model.showingModeConfirmation,
       titleVisibility: .visible
     ) {
-      Button("切换并重启模块") {
-        Task { await model.switchToECM() }
+      Button(
+        rewritesUSBIdentity ? "转换并重启模块" : "切换并重启模块",
+        role: rewritesUSBIdentity ? .destructive : nil
+      ) {
+        Task {
+          await model.switchToECM(
+            allowFactoryIdentityRewrite: rewritesUSBIdentity
+          )
+        }
       }
       Button("取消", role: .cancel) {}
     } message: {
-      Text("模块会断开并重新枚举，当前网络连接将短暂中断。")
+      if rewritesUSBIdentity {
+        Text(
+          "USB 身份将从 2CA3:4006 持久改为 2C7C:0125，并切换到 ECM。"
+            + "模块会重启并重新枚举；操作过程中请勿拔出 USB。"
+        )
+      } else {
+        Text("模块会重启并重新枚举，当前网络连接将短暂中断。")
+      }
     }
+  }
+
+  private var rewritesUSBIdentity: Bool {
+    model.connection.usbDeviceIdentifier == .djiFirstGenerationFactory
   }
 
   private var details: CellularDetails {

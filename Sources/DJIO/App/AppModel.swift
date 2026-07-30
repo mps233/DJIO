@@ -54,6 +54,12 @@ final class AppModel: ObservableObject {
   private var refreshInProgress = false
   private var pendingForegroundRefresh = false
   private var operationRevision: UInt64 = 0
+  private struct PendingUSBIdentityVerification {
+    let expectedIdentity: USBDeviceIdentifier
+    let pendingIssue: String?
+  }
+
+  private var pendingUSBIdentityVerification: PendingUSBIdentityVerification?
 
   var unreadCount: Int { messages.filter { !$0.isRead }.count }
 
@@ -212,6 +218,7 @@ final class AppModel: ObservableObject {
       guard revision == operationRevision else { return }
       connection.device = .ready
       connection.control = .ready
+      connection.usbDeviceIdentifier = result.transport.usbDeviceIdentifier
       connection.transportDescription = result.transport.summary
       connection.signalRSSI = result.signalRSSI
       connection.registration = result.registration
@@ -219,7 +226,25 @@ final class AppModel: ObservableObject {
       connection.cellularDetails = result.cellularDetails
       connection.cellular = ["已注册", "漫游"].contains(result.registration) ? .ready : .warning
       connection.lastUpdated = Date()
-      connection.issue = result.warnings.first ?? networkIssue
+      let identityIssue: String?
+      if let pendingUSBIdentityVerification {
+        let expectedIdentity = pendingUSBIdentityVerification.expectedIdentity
+        if result.transport.usbDeviceIdentifier == expectedIdentity {
+          self.pendingUSBIdentityVerification = nil
+          identityIssue = nil
+        } else if let pendingIssue = pendingUSBIdentityVerification.pendingIssue {
+          identityIssue = pendingIssue
+        } else if let observed = result.transport.usbDeviceIdentifier {
+          identityIssue =
+            "USB 身份转换未生效：预期 \(expectedIdentity)，"
+            + "当前仍为 \(observed)"
+        } else {
+          identityIssue = "模块已重新连接，但无法确认转换后的 USB 身份"
+        }
+      } else {
+        identityIssue = nil
+      }
+      connection.issue = identityIssue ?? result.warnings.first ?? networkIssue
       if !result.newMessages.isEmpty {
         await loadMessages()
         for message in result.newMessages where !message.isRead {
@@ -239,13 +264,14 @@ final class AppModel: ObservableObject {
       connection.device = connection.ecm == .ready ? .ready : .unavailable
       connection.control = .unavailable
       connection.cellular = .unavailable
+      connection.usbDeviceIdentifier = nil
       connection.cellularDetails = CellularDetails()
       connection.transportDescription = "等待 AT 通道"
       connection.issue = transportIssue
     }
   }
 
-  func switchToECM() async {
+  func switchToECM(allowFactoryIdentityRewrite: Bool) async {
     guard !isSwitchingMode, !isSendingMessage else { return }
     operationRevision &+= 1
     let revision = operationRevision
@@ -265,18 +291,50 @@ final class AppModel: ObservableObject {
     }
     guard let service else { return }
     do {
-      try await service.switchToECM(apn: apn.trimmingCharacters(in: .whitespacesAndNewlines))
+      let result = try await service.switchToECM(
+        apn: apn.trimmingCharacters(in: .whitespacesAndNewlines),
+        allowFactoryIdentityRewrite: allowFactoryIdentityRewrite
+      )
       guard revision == operationRevision else { return }
+      if result.didRewriteUSBIdentity {
+        pendingUSBIdentityVerification = PendingUSBIdentityVerification(
+          expectedIdentity: .quectelEC25,
+          pendingIssue: nil
+        )
+      }
       connection.device = .checking
       connection.control = .checking
       connection.ecm = .checking
-      connection.issue = "模块正在重新枚举，连接会在数秒后恢复"
-      try? await Task.sleep(nanoseconds: 2_000_000_000)
+      connection.issue =
+        result.didRewriteUSBIdentity
+        ? "模块正在应用新的 USB 身份并重新枚举，连接会在数秒后恢复"
+        : "模块正在重新枚举，连接会在数秒后恢复"
+      let reenumerationDelay: UInt64 =
+        result.didRewriteUSBIdentity ? 5_000_000_000 : 2_000_000_000
+      try? await Task.sleep(nanoseconds: reenumerationDelay)
       guard revision == operationRevision else { return }
       await refresh(allowDuringModeSwitch: true)
     } catch {
       guard revision == operationRevision else { return }
+      if let modeSwitchError = error as? ECMModeSwitchError,
+        let expectedIdentity = modeSwitchError.expectedUSBIdentity
+      {
+        pendingUSBIdentityVerification = PendingUSBIdentityVerification(
+          expectedIdentity: expectedIdentity,
+          pendingIssue: modeSwitchError.localizedDescription
+        )
+      }
       connection.issue = error.localizedDescription
+      guard
+        let modeSwitchError = error as? ECMModeSwitchError,
+        modeSwitchError.shouldWaitForReenumeration
+      else { return }
+      connection.device = .checking
+      connection.control = .checking
+      connection.ecm = .checking
+      try? await Task.sleep(nanoseconds: 5_000_000_000)
+      guard revision == operationRevision else { return }
+      await refresh(allowDuringModeSwitch: true)
     }
   }
 
@@ -873,6 +931,7 @@ final class AppModel: ObservableObject {
       control: .ready,
       ecm: .ready,
       cellular: .ready,
+      usbDeviceIdentifier: .quectelEC25,
       transportDescription: "USB AT · 2C7C:0125 · 接口 2 · 0x03/0x84",
       networkInterface: "en6",
       networkAddress: "192.168.225.22",

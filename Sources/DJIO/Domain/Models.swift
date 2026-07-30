@@ -45,6 +45,7 @@ struct ConnectionSnapshot: Sendable, Equatable {
   var control = LinkCondition.unavailable
   var ecm = LinkCondition.unavailable
   var cellular = LinkCondition.unavailable
+  var usbDeviceIdentifier: USBDeviceIdentifier?
   var transportDescription = "等待模块"
   var networkInterface: String?
   var networkAddress: String?
@@ -65,6 +66,70 @@ struct USBDeviceIdentifier: Sendable, Hashable, CustomStringConvertible {
 
   var description: String {
     String(format: "%04X:%04X", Int(vendorID), Int(productID))
+  }
+}
+
+extension USBDeviceIdentifier {
+  static let djiFirstGenerationFactory = USBDeviceIdentifier(
+    vendorID: 0x2CA3,
+    productID: 0x4006
+  )
+  static let quectelEC25 = USBDeviceIdentifier(
+    vendorID: 0x2C7C,
+    productID: 0x0125
+  )
+}
+
+struct ECMModeSwitchResult: Sendable, Equatable {
+  let didRewriteUSBIdentity: Bool
+}
+
+enum ECMModeSwitchError: LocalizedError, Sendable {
+  case factoryIdentityRewriteNotAuthorized
+  case identityRewriteOutcomeUnknown(String)
+  case identityRewriteAcceptedButModeSwitchFailed(String)
+  case modeSwitchOutcomeUnknown(identityRewriteAccepted: Bool, detail: String)
+
+  var expectedUSBIdentity: USBDeviceIdentifier? {
+    switch self {
+    case .identityRewriteOutcomeUnknown,
+      .identityRewriteAcceptedButModeSwitchFailed,
+      .modeSwitchOutcomeUnknown(identityRewriteAccepted: true, _):
+      return .quectelEC25
+    case .factoryIdentityRewriteNotAuthorized,
+      .modeSwitchOutcomeUnknown(identityRewriteAccepted: false, _):
+      return nil
+    }
+  }
+
+  var shouldWaitForReenumeration: Bool {
+    if case .modeSwitchOutcomeUnknown = self {
+      return true
+    }
+    return false
+  }
+
+  var errorDescription: String? {
+    switch self {
+    case .factoryIdentityRewriteNotAuthorized:
+      return
+        "检测到大疆原厂 USB 身份 2CA3:4006，但本次操作未授权永久改写。"
+        + "请刷新连接状态后重新确认。"
+    case .identityRewriteOutcomeUnknown(let detail):
+      return
+        "USB 身份改写结果未知：\(detail)。请勿拔出模块；重新连接或重启后确认当前身份。"
+    case .identityRewriteAcceptedButModeSwitchFailed(let detail):
+      return
+        "模块已接受 USB 身份改写，但后续 ECM 配置或重启失败：\(detail)。"
+        + "新身份可能在模块下次重启后生效。"
+    case .modeSwitchOutcomeUnknown(let identityRewriteAccepted, let detail):
+      if identityRewriteAccepted {
+        return
+          "模块已接受 USB 身份改写，但后续 ECM 配置或重启结果未知：\(detail)。"
+          + "正在等待设备重新枚举。"
+      }
+      return "ECM 配置或模块重启结果未知：\(detail)。正在等待设备重新枚举。"
+    }
   }
 }
 
@@ -97,6 +162,11 @@ struct USBTransportDescriptor: Sendable, Equatable {
 enum ATTransportDescriptor: Sendable, Equatable {
   case usb(USBTransportDescriptor)
   case serial(path: String, sessionID: UUID)
+
+  var usbDeviceIdentifier: USBDeviceIdentifier? {
+    guard case .usb(let info) = self else { return nil }
+    return info.deviceIdentifier
+  }
 
   var summary: String {
     switch self {

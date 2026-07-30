@@ -8,6 +8,8 @@ struct ModemServiceTests {
   private let gsm7PDU = "00040481214300004210102143650005C82293F904"
   private let firstMultipartPDU = "00440491214300084210102143650008050003AA02014F60"
   private let secondMultipartPDU = "00440491214300084210102143650008050003AA0202597D"
+  private let usbIdentityCommand =
+    "AT+QCFG=\"usbcfg\",0x2C7C,0x0125,1,1,1,1,1,0,0"
 
   @Test func importsOnceAndUsesOnlyExactIndexCleanup() async throws {
     let (root, databaseURL) = temporaryDatabase()
@@ -180,7 +182,12 @@ struct ModemServiceTests {
 
     let pollTask = Task { try? await service.poll() }
     await transport.waitUntilPaused()
-    let switchTask = Task { try? await service.switchToECM(apn: nil) }
+    let switchTask = Task {
+      try? await service.switchToECM(
+        apn: nil,
+        allowFactoryIdentityRewrite: false
+      )
+    }
     try? await Task.sleep(nanoseconds: 50_000_000)
 
     let commandsBeforeRelease = await transport.recordedBatches().flatMap { $0 }
@@ -191,24 +198,216 @@ struct ModemServiceTests {
     _ = await switchTask.value
     let commandsAfterRelease = await transport.recordedBatches().flatMap { $0 }
     #expect(commandsAfterRelease.contains("AT+QCFG=\"usbnet\",1"))
-    #expect(!commandsAfterRelease.contains("AT+CFUN=1,1"))
+    #expect(commandsAfterRelease.contains("AT+CFUN=1,1"))
+    #expect(!commandsAfterRelease.contains(where: { $0.hasPrefix("AT+QCFG=\"usbcfg\"") }))
   }
 
-  @Test func modeSwitchAcceptsExpectedUSBReenumerationDisconnect() async throws {
+  @Test func convertedIdentityOnlySwitchesNetworkMode() async throws {
     let (root, databaseURL) = temporaryDatabase()
     defer { try? FileManager.default.removeItem(at: root) }
-    let transport = FakeATTransport()
+    let transport = FakeATTransport(descriptor: usbDescriptor(.quectelEC25))
     await transport.failNext(
       command: "AT+QCFG=\"usbnet\",1",
       with: .disconnected("测试 USB 重新枚举")
     )
     let service = try ModemService(databaseURL: databaseURL, transport: transport)
 
-    try await service.switchToECM(apn: nil)
+    _ = try await service.switchToECM(
+      apn: nil,
+      allowFactoryIdentityRewrite: false
+    )
 
     let commands = await transport.recordedBatches().flatMap { $0 }
     #expect(commands.contains("AT+QCFG=\"usbnet\",1"))
     #expect(!commands.contains("AT+CFUN=1,1"))
+    #expect(!commands.contains(where: { $0.hasPrefix("AT+QCFG=\"usbcfg\"") }))
+    #expect(await transport.disconnectCount() == 1)
+  }
+
+  @Test func factoryIdentityIsConvertedBeforeECMSwitchAndRestart() async throws {
+    let (root, databaseURL) = temporaryDatabase()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let transport = FakeATTransport(
+      descriptor: usbDescriptor(.djiFirstGenerationFactory)
+    )
+    await transport.failNext(
+      command: "AT+CFUN=1,1",
+      with: .disconnected("测试模块软重启")
+    )
+    let service = try ModemService(databaseURL: databaseURL, transport: transport)
+
+    let result = try await service.switchToECM(
+      apn: nil,
+      allowFactoryIdentityRewrite: true
+    )
+
+    let configurationCommands = await transport.recordedTimeline().filter {
+      $0 == usbIdentityCommand
+        || $0 == "AT+QCFG=\"usbnet\",1"
+        || $0 == "AT+CFUN=1,1"
+    }
+    #expect(
+      configurationCommands == [
+        usbIdentityCommand,
+        "AT+QCFG=\"usbnet\",1",
+        "AT+CFUN=1,1",
+      ])
+    #expect(result == ECMModeSwitchResult(didRewriteUSBIdentity: true))
+    #expect(await transport.disconnectCount() == 1)
+  }
+
+  @Test func factoryIdentityReportsUSBNetTimeoutAsUnknown() async throws {
+    let (root, databaseURL) = temporaryDatabase()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let transport = FakeATTransport(
+      descriptor: usbDescriptor(.djiFirstGenerationFactory)
+    )
+    await transport.failNext(
+      command: "AT+QCFG=\"usbnet\",1",
+      with: .timeout(command: "AT+QCFG=\"usbnet\",1", detail: "测试重新枚举")
+    )
+    let service = try ModemService(databaseURL: databaseURL, transport: transport)
+
+    do {
+      _ = try await service.switchToECM(
+        apn: nil,
+        allowFactoryIdentityRewrite: true
+      )
+      Issue.record("usbnet 超时不应报告切换成功")
+    } catch let error as ECMModeSwitchError {
+      guard case .modeSwitchOutcomeUnknown(let identityRewriteAccepted, _) = error else {
+        Issue.record("预期模式切换结果未知，实际为 \(error)")
+        return
+      }
+      #expect(identityRewriteAccepted)
+      #expect(error.expectedUSBIdentity == .quectelEC25)
+    }
+
+    let configurationCommands = await transport.recordedTimeline().filter {
+      $0 == usbIdentityCommand
+        || $0 == "AT+QCFG=\"usbnet\",1"
+        || $0 == "AT+CFUN=1,1"
+    }
+    #expect(
+      configurationCommands == [
+        usbIdentityCommand,
+        "AT+QCFG=\"usbnet\",1",
+      ])
+    #expect(await transport.disconnectCount() == 1)
+  }
+
+  @Test func factoryIdentityRequiresExplicitRewriteAuthorization() async throws {
+    let (root, databaseURL) = temporaryDatabase()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let transport = FakeATTransport(
+      descriptor: usbDescriptor(.djiFirstGenerationFactory)
+    )
+    let service = try ModemService(databaseURL: databaseURL, transport: transport)
+
+    await #expect(throws: ECMModeSwitchError.self) {
+      _ = try await service.switchToECM(
+        apn: nil,
+        allowFactoryIdentityRewrite: false
+      )
+    }
+
+    let commands = await transport.recordedBatches().flatMap { $0 }
+    #expect(!commands.contains(usbIdentityCommand))
+    #expect(!commands.contains("AT+QCFG=\"usbnet\",1"))
+    #expect(!commands.contains("AT+CFUN=1,1"))
+  }
+
+  @Test func acceptedIdentityRewriteReportsLaterConfigurationFailure() async throws {
+    let (root, databaseURL) = temporaryDatabase()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let transport = FakeATTransport(
+      descriptor: usbDescriptor(.djiFirstGenerationFactory)
+    )
+    await transport.failNext(
+      command: "AT+QCFG=\"usbnet\",1",
+      with: .modemRejected(command: "AT+QCFG=\"usbnet\",1", response: "ERROR")
+    )
+    let service = try ModemService(databaseURL: databaseURL, transport: transport)
+
+    do {
+      _ = try await service.switchToECM(
+        apn: nil,
+        allowFactoryIdentityRewrite: true
+      )
+      Issue.record("身份改写后的 ECM 配置失败不应报告成功")
+    } catch let error as ECMModeSwitchError {
+      guard case .identityRewriteAcceptedButModeSwitchFailed = error else {
+        Issue.record("预期部分完成错误，实际为 \(error)")
+        return
+      }
+      #expect(error.expectedUSBIdentity == .quectelEC25)
+    }
+
+    let configurationCommands = await transport.recordedTimeline().filter {
+      $0 == usbIdentityCommand
+        || $0 == "AT+QCFG=\"usbnet\",1"
+        || $0 == "AT+CFUN=1,1"
+    }
+    #expect(
+      configurationCommands == [
+        usbIdentityCommand,
+        "AT+QCFG=\"usbnet\",1",
+      ])
+    #expect(await transport.disconnectCount() == 1)
+  }
+
+  @Test func failedFactoryIdentityChangeStopsBeforeECMAndRestart() async throws {
+    let (root, databaseURL) = temporaryDatabase()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let transport = FakeATTransport(
+      descriptor: usbDescriptor(.djiFirstGenerationFactory)
+    )
+    await transport.failNext(
+      command: usbIdentityCommand,
+      with: .modemRejected(command: usbIdentityCommand, response: "ERROR")
+    )
+    let service = try ModemService(databaseURL: databaseURL, transport: transport)
+
+    await #expect(throws: ModemTransportError.self) {
+      _ = try await service.switchToECM(
+        apn: nil,
+        allowFactoryIdentityRewrite: true
+      )
+    }
+
+    let commands = await transport.recordedBatches().flatMap { $0 }
+    #expect(commands.contains(usbIdentityCommand))
+    #expect(!commands.contains("AT+QCFG=\"usbnet\",1"))
+    #expect(!commands.contains("AT+CFUN=1,1"))
+    #expect(await transport.disconnectCount() == 1)
+  }
+
+  @Test func rejectedModuleRestartIsReportedAndTransportIsClosed() async throws {
+    let (root, databaseURL) = temporaryDatabase()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let transport = FakeATTransport(descriptor: usbDescriptor(.quectelEC25))
+    await transport.failNext(
+      command: "AT+CFUN=1,1",
+      with: .modemRejected(command: "AT+CFUN=1,1", response: "ERROR")
+    )
+    let service = try ModemService(databaseURL: databaseURL, transport: transport)
+
+    await #expect(throws: ModemTransportError.self) {
+      _ = try await service.switchToECM(
+        apn: nil,
+        allowFactoryIdentityRewrite: false
+      )
+    }
+
+    let configurationCommands = await transport.recordedTimeline().filter {
+      $0 == "AT+QCFG=\"usbnet\",1" || $0 == "AT+CFUN=1,1"
+    }
+    #expect(
+      configurationCommands == [
+        "AT+QCFG=\"usbnet\",1",
+        "AT+CFUN=1,1",
+      ])
+    #expect(await transport.disconnectCount() == 1)
   }
 
   @Test func passesAllSupportedUSBDevicesInPriorityOrder() async throws {
@@ -422,8 +621,9 @@ struct ModemServiceTests {
     #expect(storedCalls.first?.id == call.id)
     #expect(storedCalls.first?.callerNumber == call.callerNumber)
     #expect(
-      abs((storedCalls.first?.receivedAt.timeIntervalSince1970 ?? 0)
-        - call.receivedAt.timeIntervalSince1970) < 0.000_001)
+      abs(
+        (storedCalls.first?.receivedAt.timeIntervalSince1970 ?? 0)
+          - call.receivedAt.timeIntervalSince1970) < 0.000_001)
     let commands = await transport.recordedBatches().flatMap { $0 }
     #expect(commands.filter { $0 == "AT+CLCC" }.count == 1)
     #expect(commands.contains("AT+CLIP=1"))
@@ -668,6 +868,21 @@ struct ModemServiceTests {
     return (root, root.appendingPathComponent("messages.sqlite3"))
   }
 
+  private func usbDescriptor(_ identifier: USBDeviceIdentifier) -> ATTransportDescriptor {
+    .usb(
+      USBTransportDescriptor(
+        sessionID: UUID(),
+        vendorID: identifier.vendorID,
+        productID: identifier.productID,
+        bus: 1,
+        address: 2,
+        interfaceNumber: 2,
+        alternateSetting: 0,
+        endpointIn: 0x84,
+        endpointOut: 0x03
+      ))
+  }
+
   private func cmgl(_ records: [(Int, Int, String)]) -> String {
     records.map { index, status, pdu in
       "+CMGL: \(index),\(status),,\(pdu.count / 2)\r\n\(pdu)"
@@ -692,8 +907,7 @@ private actor OutgoingUpdateRecorder {
 }
 
 private actor FakeATTransport: ATTransporting {
-  private let descriptor = ATTransportDescriptor.serial(
-    path: "/dev/cu.test-modem", sessionID: UUID())
+  private let descriptor: ATTransportDescriptor
   private var smResponse: String
   private var meResponse: String
   private var simResponse = "\r\n+CPIN: READY\r\nOK\r\n"
@@ -712,8 +926,17 @@ private actor FakeATTransport: ATTransporting {
   private var timeline: [String] = []
   private var incomingEventsAfterSend: [Int: ATURC] = [:]
   private var clccResponse = "\r\nOK\r\n"
+  private var disconnectCalls = 0
 
-  init(smResponse: String = "\r\nOK\r\n", meResponse: String = "\r\nOK\r\n") {
+  init(
+    descriptor: ATTransportDescriptor = .serial(
+      path: "/dev/cu.test-modem",
+      sessionID: UUID()
+    ),
+    smResponse: String = "\r\nOK\r\n",
+    meResponse: String = "\r\nOK\r\n"
+  ) {
+    self.descriptor = descriptor
     self.smResponse = smResponse
     self.meResponse = meResponse
   }
@@ -832,7 +1055,9 @@ private actor FakeATTransport: ATTransporting {
     return stream
   }
 
-  func disconnect() async {}
+  func disconnect() async {
+    disconnectCalls += 1
+  }
 
   func recordedBatches() -> [[String]] {
     batches
@@ -840,6 +1065,10 @@ private actor FakeATTransport: ATTransporting {
 
   func recordedSupportedUSBDevices() -> [[USBDeviceIdentifier]] {
     supportedUSBDeviceRequests
+  }
+
+  func disconnectCount() -> Int {
+    disconnectCalls
   }
 
   func setSMResponse(_ response: String) {
