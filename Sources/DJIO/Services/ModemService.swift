@@ -713,6 +713,8 @@ actor ModemService {
     try await initializeIfNeeded(descriptor: descriptor)
     let rewritesUSBIdentity =
       descriptor.usbDeviceIdentifier == .djiFirstGenerationFactory
+    let expectedUSBIdentity =
+      rewritesUSBIdentity ? USBDeviceIdentifier.quectelEC25 : descriptor.usbDeviceIdentifier
     guard !rewritesUSBIdentity || allowFactoryIdentityRewrite else {
       throw ECMModeSwitchError.factoryIdentityRewriteNotAuthorized
     }
@@ -756,6 +758,7 @@ actor ModemService {
           restartHasStarted = true
         } else if Self.isTimeout(error) {
           throw ECMModeSwitchError.modeSwitchOutcomeUnknown(
+            expectedUSBIdentity: expectedUSBIdentity,
             identityRewriteAccepted: identityRewriteAccepted,
             detail: error.localizedDescription
           )
@@ -778,6 +781,7 @@ actor ModemService {
             restartHasStarted = true
           } else if Self.isTimeout(error) {
             throw ECMModeSwitchError.modeSwitchOutcomeUnknown(
+              expectedUSBIdentity: expectedUSBIdentity,
               identityRewriteAccepted: identityRewriteAccepted,
               detail: error.localizedDescription
             )
@@ -792,7 +796,10 @@ actor ModemService {
       }
 
       await disconnectExclusively()
-      return ECMModeSwitchResult(didRewriteUSBIdentity: identityRewriteAccepted)
+      return ECMModeSwitchResult(
+        didRewriteUSBIdentity: identityRewriteAccepted,
+        expectedUSBIdentity: expectedUSBIdentity
+      )
     } catch {
       await disconnectExclusively()
       throw error

@@ -32,6 +32,7 @@ final class AppModel: ObservableObject {
   }
   @Published var isSwitchingMode = false
   @Published var showingModeConfirmation = false
+  @Published private(set) var modeConfirmationAllowsFactoryIdentityRewrite = false
   @Published var preferredInterface: String?
   @Published var preferredSerialPath: String
   @Published var apn: String
@@ -54,12 +55,12 @@ final class AppModel: ObservableObject {
   private var refreshInProgress = false
   private var pendingForegroundRefresh = false
   private var operationRevision: UInt64 = 0
-  private struct PendingUSBIdentityVerification {
-    let expectedIdentity: USBDeviceIdentifier
+  private struct PendingECMModeSwitchVerification {
+    let expectedUSBIdentity: USBDeviceIdentifier?
     let pendingIssue: String?
   }
 
-  private var pendingUSBIdentityVerification: PendingUSBIdentityVerification?
+  private var pendingECMModeSwitchVerification: PendingECMModeSwitchVerification?
 
   var unreadCount: Int { messages.filter { !$0.isRead }.count }
 
@@ -226,25 +227,10 @@ final class AppModel: ObservableObject {
       connection.cellularDetails = result.cellularDetails
       connection.cellular = ["已注册", "漫游"].contains(result.registration) ? .ready : .warning
       connection.lastUpdated = Date()
-      let identityIssue: String?
-      if let pendingUSBIdentityVerification {
-        let expectedIdentity = pendingUSBIdentityVerification.expectedIdentity
-        if result.transport.usbDeviceIdentifier == expectedIdentity {
-          self.pendingUSBIdentityVerification = nil
-          identityIssue = nil
-        } else if let pendingIssue = pendingUSBIdentityVerification.pendingIssue {
-          identityIssue = pendingIssue
-        } else if let observed = result.transport.usbDeviceIdentifier {
-          identityIssue =
-            "USB 身份转换未生效：预期 \(expectedIdentity)，"
-            + "当前仍为 \(observed)"
-        } else {
-          identityIssue = "模块已重新连接，但无法确认转换后的 USB 身份"
-        }
-      } else {
-        identityIssue = nil
-      }
-      connection.issue = identityIssue ?? result.warnings.first ?? networkIssue
+      let modeSwitchIssue = pendingModeSwitchIssue(
+        observedUSBIdentity: result.transport.usbDeviceIdentifier
+      )
+      connection.issue = modeSwitchIssue ?? result.warnings.first ?? networkIssue
       if !result.newMessages.isEmpty {
         await loadMessages()
         for message in result.newMessages where !message.isRead {
@@ -269,6 +255,12 @@ final class AppModel: ObservableObject {
       connection.transportDescription = "等待 AT 通道"
       connection.issue = transportIssue
     }
+  }
+
+  func presentModeSwitchConfirmation() {
+    modeConfirmationAllowsFactoryIdentityRewrite =
+      connection.usbDeviceIdentifier == .djiFirstGenerationFactory
+    showingModeConfirmation = true
   }
 
   func switchToECM(allowFactoryIdentityRewrite: Bool) async {
@@ -296,12 +288,10 @@ final class AppModel: ObservableObject {
         allowFactoryIdentityRewrite: allowFactoryIdentityRewrite
       )
       guard revision == operationRevision else { return }
-      if result.didRewriteUSBIdentity {
-        pendingUSBIdentityVerification = PendingUSBIdentityVerification(
-          expectedIdentity: .quectelEC25,
-          pendingIssue: nil
-        )
-      }
+      pendingECMModeSwitchVerification = PendingECMModeSwitchVerification(
+        expectedUSBIdentity: result.expectedUSBIdentity,
+        pendingIssue: nil
+      )
       connection.device = .checking
       connection.control = .checking
       connection.ecm = .checking
@@ -317,10 +307,10 @@ final class AppModel: ObservableObject {
     } catch {
       guard revision == operationRevision else { return }
       if let modeSwitchError = error as? ECMModeSwitchError,
-        let expectedIdentity = modeSwitchError.expectedUSBIdentity
+        modeSwitchError.shouldVerifyModeSwitch
       {
-        pendingUSBIdentityVerification = PendingUSBIdentityVerification(
-          expectedIdentity: expectedIdentity,
+        pendingECMModeSwitchVerification = PendingECMModeSwitchVerification(
+          expectedUSBIdentity: modeSwitchError.expectedUSBIdentity,
           pendingIssue: modeSwitchError.localizedDescription
         )
       }
@@ -336,6 +326,33 @@ final class AppModel: ObservableObject {
       guard revision == operationRevision else { return }
       await refresh(allowDuringModeSwitch: true)
     }
+  }
+
+  private func pendingModeSwitchIssue(
+    observedUSBIdentity: USBDeviceIdentifier?
+  ) -> String? {
+    guard let verification = pendingECMModeSwitchVerification else { return nil }
+
+    if let expectedUSBIdentity = verification.expectedUSBIdentity,
+      observedUSBIdentity != expectedUSBIdentity
+    {
+      if let pendingIssue = verification.pendingIssue {
+        return pendingIssue
+      }
+      if let observedUSBIdentity {
+        return
+          "USB 身份转换未生效：预期 \(expectedUSBIdentity)，"
+          + "当前仍为 \(observedUSBIdentity)"
+      }
+      return "模块已重新连接，但无法确认转换后的 USB 身份"
+    }
+
+    guard connection.ecm == .ready || connection.ecm == .warning else {
+      return verification.pendingIssue ?? "模块已重新连接，但未检测到 ECM 网络接口"
+    }
+
+    pendingECMModeSwitchVerification = nil
+    return nil
   }
 
   func selectMessage(_ id: String?) {

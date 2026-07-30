@@ -212,7 +212,7 @@ struct ModemServiceTests {
     )
     let service = try ModemService(databaseURL: databaseURL, transport: transport)
 
-    _ = try await service.switchToECM(
+    let result = try await service.switchToECM(
       apn: nil,
       allowFactoryIdentityRewrite: false
     )
@@ -221,7 +221,46 @@ struct ModemServiceTests {
     #expect(commands.contains("AT+QCFG=\"usbnet\",1"))
     #expect(!commands.contains("AT+CFUN=1,1"))
     #expect(!commands.contains(where: { $0.hasPrefix("AT+QCFG=\"usbcfg\"") }))
+    #expect(
+      result
+        == ECMModeSwitchResult(
+          didRewriteUSBIdentity: false,
+          expectedUSBIdentity: .quectelEC25
+        ))
     #expect(await transport.disconnectCount() == 1)
+  }
+
+  @Test func convertedIdentityTimeoutKeepsIdentityForECMVerification() async throws {
+    let (root, databaseURL) = temporaryDatabase()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let transport = FakeATTransport(descriptor: usbDescriptor(.quectelEC25))
+    await transport.failNext(
+      command: "AT+QCFG=\"usbnet\",1",
+      with: .timeout(command: "AT+QCFG=\"usbnet\",1", detail: "测试结果未知")
+    )
+    let service = try ModemService(databaseURL: databaseURL, transport: transport)
+
+    do {
+      _ = try await service.switchToECM(
+        apn: nil,
+        allowFactoryIdentityRewrite: false
+      )
+      Issue.record("usbnet 超时不应报告切换成功")
+    } catch let error as ECMModeSwitchError {
+      guard
+        case .modeSwitchOutcomeUnknown(
+          let expectedUSBIdentity,
+          let identityRewriteAccepted,
+          _
+        ) = error
+      else {
+        Issue.record("预期模式切换结果未知，实际为 \(error)")
+        return
+      }
+      #expect(expectedUSBIdentity == .quectelEC25)
+      #expect(!identityRewriteAccepted)
+      #expect(error.shouldVerifyModeSwitch)
+    }
   }
 
   @Test func factoryIdentityIsConvertedBeforeECMSwitchAndRestart() async throws {
@@ -252,7 +291,12 @@ struct ModemServiceTests {
         "AT+QCFG=\"usbnet\",1",
         "AT+CFUN=1,1",
       ])
-    #expect(result == ECMModeSwitchResult(didRewriteUSBIdentity: true))
+    #expect(
+      result
+        == ECMModeSwitchResult(
+          didRewriteUSBIdentity: true,
+          expectedUSBIdentity: .quectelEC25
+        ))
     #expect(await transport.disconnectCount() == 1)
   }
 
@@ -275,10 +319,17 @@ struct ModemServiceTests {
       )
       Issue.record("usbnet 超时不应报告切换成功")
     } catch let error as ECMModeSwitchError {
-      guard case .modeSwitchOutcomeUnknown(let identityRewriteAccepted, _) = error else {
+      guard
+        case .modeSwitchOutcomeUnknown(
+          let expectedUSBIdentity,
+          let identityRewriteAccepted,
+          _
+        ) = error
+      else {
         Issue.record("预期模式切换结果未知，实际为 \(error)")
         return
       }
+      #expect(expectedUSBIdentity == .quectelEC25)
       #expect(identityRewriteAccepted)
       #expect(error.expectedUSBIdentity == .quectelEC25)
     }

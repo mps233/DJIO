@@ -82,24 +82,36 @@ extension USBDeviceIdentifier {
 
 struct ECMModeSwitchResult: Sendable, Equatable {
   let didRewriteUSBIdentity: Bool
+  let expectedUSBIdentity: USBDeviceIdentifier?
 }
 
 enum ECMModeSwitchError: LocalizedError, Sendable {
   case factoryIdentityRewriteNotAuthorized
   case identityRewriteOutcomeUnknown(String)
   case identityRewriteAcceptedButModeSwitchFailed(String)
-  case modeSwitchOutcomeUnknown(identityRewriteAccepted: Bool, detail: String)
+  case modeSwitchOutcomeUnknown(
+    expectedUSBIdentity: USBDeviceIdentifier?,
+    identityRewriteAccepted: Bool,
+    detail: String
+  )
 
   var expectedUSBIdentity: USBDeviceIdentifier? {
     switch self {
     case .identityRewriteOutcomeUnknown,
-      .identityRewriteAcceptedButModeSwitchFailed,
-      .modeSwitchOutcomeUnknown(identityRewriteAccepted: true, _):
+      .identityRewriteAcceptedButModeSwitchFailed:
       return .quectelEC25
-    case .factoryIdentityRewriteNotAuthorized,
-      .modeSwitchOutcomeUnknown(identityRewriteAccepted: false, _):
+    case .modeSwitchOutcomeUnknown(let expectedUSBIdentity, _, _):
+      return expectedUSBIdentity
+    case .factoryIdentityRewriteNotAuthorized:
       return nil
     }
+  }
+
+  var shouldVerifyModeSwitch: Bool {
+    if case .factoryIdentityRewriteNotAuthorized = self {
+      return false
+    }
+    return true
   }
 
   var shouldWaitForReenumeration: Bool {
@@ -122,7 +134,7 @@ enum ECMModeSwitchError: LocalizedError, Sendable {
       return
         "模块已接受 USB 身份改写，但后续 ECM 配置或重启失败：\(detail)。"
         + "新身份可能在模块下次重启后生效。"
-    case .modeSwitchOutcomeUnknown(let identityRewriteAccepted, let detail):
+    case .modeSwitchOutcomeUnknown(_, let identityRewriteAccepted, let detail):
       if identityRewriteAccepted {
         return
           "模块已接受 USB 身份改写，但后续 ECM 配置或重启结果未知：\(detail)。"

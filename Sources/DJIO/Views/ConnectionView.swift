@@ -99,28 +99,28 @@ struct ConnectionView: View {
         isSecondaryDisabled: model.isSwitchingMode || model.isRefreshing || model.isSendingMessage
           || model.connection.control == .unavailable,
         secondaryAction: {
-          model.showingModeConfirmation = true
+          model.presentModeSwitchConfirmation()
         }
       )
     }
     .confirmationDialog(
-      rewritesUSBIdentity ? "转换大疆模块并启用 ECM？" : "切换到 ECM 模式？",
+      confirmedFactoryIdentityRewrite ? "转换大疆模块并启用 ECM？" : "切换到 ECM 模式？",
       isPresented: $model.showingModeConfirmation,
       titleVisibility: .visible
     ) {
       Button(
-        rewritesUSBIdentity ? "转换并重启模块" : "切换并重启模块",
-        role: rewritesUSBIdentity ? .destructive : nil
+        confirmedFactoryIdentityRewrite ? "转换并重启模块" : "切换并重启模块",
+        role: confirmedFactoryIdentityRewrite ? .destructive : nil
       ) {
         Task {
           await model.switchToECM(
-            allowFactoryIdentityRewrite: rewritesUSBIdentity
+            allowFactoryIdentityRewrite: confirmedFactoryIdentityRewrite
           )
         }
       }
       Button("取消", role: .cancel) {}
     } message: {
-      if rewritesUSBIdentity {
+      if confirmedFactoryIdentityRewrite {
         Text(
           "USB 身份将从 2CA3:4006 持久改为 2C7C:0125，并切换到 ECM。"
             + "模块会重启并重新枚举；操作过程中请勿拔出 USB。"
@@ -133,6 +133,10 @@ struct ConnectionView: View {
 
   private var rewritesUSBIdentity: Bool {
     model.connection.usbDeviceIdentifier == .djiFirstGenerationFactory
+  }
+
+  private var confirmedFactoryIdentityRewrite: Bool {
+    model.modeConfirmationAllowsFactoryIdentityRewrite
   }
 
   private var details: CellularDetails {
