@@ -1,5 +1,9 @@
 # DJIO
 
+<p align="center">
+  <img src="docs/assets/djio-icon.png" width="160" alt="DJIO 应用图标">
+</p>
+
 DJIO 是一款原生 macOS 工具，可将受支持的蜂窝 USB 模块用作 Mac 的便携式
 4G 网卡，并提供短信、接码和来电号码记录功能。它可以配置 ECM 网络、收发短信、
 接收验证码，以及记录来电号码和时间。
@@ -16,6 +20,22 @@ VoWiFi/IMS 通话。
 - 为新短信和来电显示 macOS 通知
 - 在本机保存短信、发件记录、来电记录和流量统计
 - 支持菜单栏运行和登录时自动启动
+
+## 界面预览
+
+> 以下截图均使用内置演示数据，不包含真实短信、电话号码或网络信息。
+
+### 连接
+
+![DJIO 连接页面](docs/screenshots/connection.png)
+
+### 短信
+
+![DJIO 短信页面](docs/screenshots/messages.png)
+
+### 来电
+
+![DJIO 来电记录页面](docs/screenshots/calls.png)
 
 ## Mac 和 iPad
 
