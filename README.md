@@ -1,103 +1,92 @@
-# CellularBridge / 蜂窝桥
+# DJIO
 
-CellularBridge is a native macOS utility for a DJI first-generation 4G module.
-It lets macOS own the modem's ECM network interface while the app uses a
-separate USB or serial AT control channel to receive SMS messages.
+DJIO 是一款原生 macOS 工具，可将受支持的蜂窝 USB 模块用作 Mac 的便携式
+4G 网卡，并提供短信、接码和来电号码记录功能。它可以配置 ECM 网络、收发短信、
+接收验证码，以及记录来电号码和时间。
 
-This is an independent implementation. It does not include source code from
-DJOneHub or VoHive.
+DJIO 只记录来电号码，不能接听电话、传输通话音频、提供语音信箱，也不实现
+VoWiFi/IMS 通话。
 
-## Current scope
+## 功能
 
-- Detect and probe the verified `2C7C:0125` device and the alternate `2CA3:4006`
-  identity without detaching the ECM driver
-- Fall back to a supported `/dev/cu.*` AT serial port
-- Switch the modem to `usbnet=1` ECM mode and let this firmware perform its own USB hot restart
-- Query SIM state, firmware, registration, operator, radio access technology,
-  band, channel and signal metrics
-- Show one-second upload/download rates plus session, daily and monthly totals
-  for the selected ECM interface
-- Keep daily and monthly traffic totals in local Application Support storage
-- Ignore VPN/TUN interfaces when checking whether ECM owns the default route
-- Keep one continuous AT reader and route unsolicited `+CMTI` notifications
-  without mixing them into command responses
-- Read a newly announced message by its exact storage and index, then run a
-  full `SM`/`ME` reconciliation every 60 seconds as a missed-event fallback
-- Show used and total message capacity for both SMS stores
-- Decode GSM 7-bit, 8-bit and UCS-2 SMS-DELIVER messages
-- Reassemble 8-bit and 16-bit concatenated SMS messages
-- Persist messages and per-part import receipts in SQLite before showing a notification
-- Send GSM 7-bit and Unicode SMS-SUBMIT PDUs, including concatenated long messages
-- Reserve long-message concatenation references in SQLite so the same recipient
-  does not reuse one within 24 hours or while an earlier message can still be retried
-- Persist each exact outgoing PDU, TPDU length, per-part progress and modem reference
-- Release the AT operation lock between long-message parts so queued `+CMTI`
-  reads can run before the next part is submitted
-- Return safe pre-submit transport failures to the queue for connection recovery
-- Treat an interrupted or timed-out post-submit result as unknown and never
-  retry it automatically, avoiding accidental duplicate messages
-- Keep the unread SMS count synchronized across the sidebar, menu bar and Dock badge
-- Open and select the matching message when its notification is clicked
-- Optionally start automatically after login using the native macOS login-item service
-  after the app is moved to `/Applications`
-- Optionally delete only the exact imported modem indexes (`CMGD=<index>,0`), disabled by default
-- Keep a durable local tombstone so deleting a message in the app cannot make it reappear
+- 将兼容模块配置为 ECM 网卡
+- 显示连接、SIM 卡、运营商、无线制式、信号和本机流量信息
+- 收发短信，支持长短信、GSM 7-bit 和 Unicode
+- 将验证码作为普通短信接收
+- 为新短信和来电显示 macOS 通知
+- 在本机保存短信、发件记录、来电记录和流量统计
+- 支持菜单栏运行和登录时自动启动
 
-## Build
+## Mac 和 iPad
 
-Requirements:
+DJIO 本身运行于 macOS。
 
-- macOS 26 on Apple Silicon
-- Xcode 26.6 or later
-- Homebrew `libusb` and `pkgconf`
+模块配置为 ECM 模式后，兼容的 USB-C iPad 也可以将其数据连接用作 USB
+以太网。iPad 能否使用取决于模块固件、iPad 型号、iPadOS 版本、线材、USB
+供电、APN 和运营商。
+
+DJIO 不包含 iPadOS 应用。短信管理和来电提醒需要将模块连接到正在运行 DJIO
+的 Mac。
+
+## 硬件支持
+
+| USB 标识 | 支持情况 |
+| --- | --- |
+| `2C7C:0125` | 已实机验证的百旺 / 第一代大疆 4G 模块 |
+| `2CA3:4006` | 已识别的另一种设备标识，尚未进行同等程度的验证 |
+
+DJIO 也可以通过兼容的 `/dev/cu.*` AT 串口以 115200 波特率工作。
+
+控制通道尽量使用标准 AT 指令，同时包含少量 Quectel 专用行为。ECM 切换目前使用
+`AT+QCFG="usbnet",1`，因此支持 AT 指令的模块不一定能直接使用 DJIO。来电记录
+还依赖模块和运营商提供 `RING`、`+CLIP` 或 `AT+CLCC` 信息。隐藏或无法获取的
+来电号码会记录为未知号码。
+
+DJIO 不会分离 ECM 内核驱动、修改当前 USB 配置或重置 USB 设备。macOS 会继续
+管理网络接口，应用则使用独立的 AT 控制通道。
+
+## 构建
+
+环境要求：
+
+- 运行 macOS 26 的 Apple 芯片 Mac
+- Xcode 26.6 或更高版本
+- Homebrew `libusb` 和 `pkgconf`
 
 ```bash
 brew install libusb pkgconf
 swift test
 ./scripts/build-app.sh
-open -n ../outputs/CellularBridge.app --args --demo
+open -n ../outputs/DJIO.app --args --demo
 ```
 
-The build script creates `../outputs/CellularBridge.app`, embeds the Homebrew
-libusb dylib, rewrites its install name and applies an ad-hoc local signature.
+构建脚本会生成 `../outputs/DJIO.app`，嵌入 Homebrew 提供的 `libusb` 动态库，
+重写其加载路径，并为应用添加本地临时签名。
 
-## Hardware verification
+## 本地数据与隐私
 
-Live inspection on the target Mac confirmed the connected module enumerates as
-`Baiwang` / `2C7C:0125`. Interfaces 4 and 5 provide ECM as `en9`, while vendor
-interface 2 answers both `AT` and `AT+CMGF=?` over bulk endpoints `0x03/0x84`.
-The app also recognizes the alternate `2CA3:4006` identity.
+DJIO 不使用账号、分析统计、云同步或外部应用服务器。短信、发件状态、来电记录和
+流量统计均保存在 `~/Library/Application Support/CellularBridge/`。这里有意
+保留了旧版内部目录名，确保升级为 DJIO 后仍可继续使用已有数据。
 
-The remaining hardware checks are concurrent data transfer while receiving test
-messages in both `SM` and `ME`, interrupted exact-index deletion, and an explicit
-outbound test to a user-approved number. Keep "导入后清理模块短信" disabled while
-validating the receive paths. Automated tests never send a real SMS.
+你发送的短信和网络流量仍会经过移动运营商。通知内容是否在锁定屏幕上显示由
+macOS 通知设置决定。流量统计来自 macOS 网络接口计数器，并非运营商账单数据。
 
-The app never calls `libusb_detach_kernel_driver`, changes the active USB
-configuration or resets the USB device. This prevents the AT path from taking
-ownership of the ECM interface.
+## 限制
 
-Traffic totals come from macOS interface counters and are not the carrier's
-billable-usage measurement. A counter reset, interface change or long sampling
-gap establishes a new baseline instead of adding a false traffic spike. Session
-totals reset when the app starts; daily and monthly totals persist locally.
+- DJIO 只记录来电号码和时间
+- 不能接听、拒接或挂断电话
+- 不提供通话音频、语音信箱、VoWiFi 或 IMS 通话
+- 不保证支持列表之外的硬件
+- 来电号码能否获取取决于模块、SIM 卡、运营商和网络
 
-The cleanup path never uses a module-wide `CMGD` flag. A PDU is eligible for
-deletion only after its complete message and constituent-part receipts have
-committed to SQLite. Disabling cleanup keeps the import receipts active, so a
-rescanned modem copy is not shown or notified twice.
+## 分发说明
 
-`AT+CMGS` is interactive: the app waits for the modem's `>` prompt, writes the
-PDU followed by Ctrl-Z, and then waits for `+CMGS` plus the final result. A
-missing prompt is cancelled with ESC before reconnecting, and a rejection before
-the prompt is safe to retry. Once PDU submission starts, any error, disconnect,
-timeout or missing `+CMGS` receipt is recorded as "outcome unknown" and requires
-an explicit confirmation before retrying because the carrier may have already
-accepted the message.
+当前嵌入的 Homebrew `libusb` 仅支持 arm64，并且以 macOS 26 为最低目标，适合
+在当前配置上本地构建，但不适合作为通用二进制版本发布。正式分发时应嵌入面向预期
+系统版本构建的通用 `libusb`，并使用 Developer ID 完成签名和公证。
 
-## Distribution
+## 独立声明
 
-The bundled Homebrew libusb bottle is arm64-only and built for macOS 26. It is
-suitable for this Mac but not a general release. A public build should bundle a
-universal libusb dylib built with the intended deployment target and then be
-signed and notarized with a Developer ID.
+DJIO 是独立、非官方项目，与大疆、Quectel 或任何移动运营商均无关联。本项目不包含
+DJOneHub 或 VoHive 的源代码。

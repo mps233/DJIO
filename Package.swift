@@ -3,7 +3,7 @@
 import PackageDescription
 
 let package = Package(
-  name: "CellularBridge",
+  name: "DJIO",
   defaultLocalization: "zh-Hans",
   platforms: [
     // The local Homebrew libusb bottle is built for macOS 26. A later
@@ -11,7 +11,7 @@ let package = Package(
     .macOS(.v26)
   ],
   products: [
-    .executable(name: "CellularBridge", targets: ["CellularBridge"])
+    .executable(name: "DJIO", targets: ["DJIO"])
   ],
   targets: [
     .systemLibrary(
@@ -29,9 +29,9 @@ let package = Package(
       publicHeadersPath: "include"
     ),
     .executableTarget(
-      name: "CellularBridge",
+      name: "DJIO",
       dependencies: ["CModemBridge"],
-      path: "Sources/CellularBridge",
+      path: "Sources/DJIO",
       linkerSettings: [
         .linkedLibrary("sqlite3"),
         .linkedFramework("IOKit"),
@@ -40,9 +40,9 @@ let package = Package(
       ]
     ),
     .testTarget(
-      name: "CellularBridgeTests",
-      dependencies: ["CellularBridge", "CModemBridge"],
-      path: "Tests/CellularBridgeTests"
+      name: "DJIOTests",
+      dependencies: ["DJIO", "CModemBridge"],
+      path: "Tests/DJIOTests"
     ),
   ],
   swiftLanguageModes: [.v5]

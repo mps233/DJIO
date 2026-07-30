@@ -3,10 +3,10 @@ set -euo pipefail
 
 project_root="${0:A:h:h}"
 output_root="${project_root:h}/outputs"
-app_path="$output_root/CellularBridge.app"
+app_path="$output_root/DJIO.app"
 contents="$app_path/Contents"
 swift build --package-path "$project_root" -c release
-binary_path="$(swift build --package-path "$project_root" -c release --show-bin-path)/CellularBridge"
+binary_path="$(swift build --package-path "$project_root" -c release --show-bin-path)/DJIO"
 libusb_prefix="$(brew --prefix libusb)"
 libusb_source="$libusb_prefix/lib/libusb-1.0.0.dylib"
 asset_info="$project_root/.build/assetcatalog_generated_info.plist"
@@ -16,7 +16,7 @@ if [[ -e "$app_path" ]]; then
 fi
 /bin/mkdir -p "$contents/MacOS" "$contents/Frameworks" "$contents/Resources/Licenses" "$output_root"
 
-/bin/cp "$binary_path" "$contents/MacOS/CellularBridge"
+/bin/cp "$binary_path" "$contents/MacOS/DJIO"
 /bin/cp "$project_root/Packaging/Info.plist" "$contents/Info.plist"
 /bin/cp "$libusb_source" "$contents/Frameworks/libusb-1.0.0.dylib"
 /bin/cp "$libusb_prefix/COPYING" "$contents/Resources/Licenses/libusb-LGPL-2.1.txt"
@@ -34,13 +34,13 @@ fi
     "$project_root/Packaging/AppIcon.icon"
 /usr/libexec/PlistBuddy -c "Merge $asset_info" "$contents/Info.plist"
 
-dependency="$(/usr/bin/otool -L "$contents/MacOS/CellularBridge" | /usr/bin/awk '/libusb-1.0/{print $1; exit}')"
+dependency="$(/usr/bin/otool -L "$contents/MacOS/DJIO" | /usr/bin/awk '/libusb-1.0/{print $1; exit}')"
 if [[ -n "$dependency" ]]; then
-    /usr/bin/install_name_tool -change "$dependency" "@rpath/libusb-1.0.0.dylib" "$contents/MacOS/CellularBridge"
+    /usr/bin/install_name_tool -change "$dependency" "@rpath/libusb-1.0.0.dylib" "$contents/MacOS/DJIO"
 fi
 /usr/bin/install_name_tool -id "@rpath/libusb-1.0.0.dylib" "$contents/Frameworks/libusb-1.0.0.dylib"
-if ! /usr/bin/otool -l "$contents/MacOS/CellularBridge" | /usr/bin/grep -q '@executable_path/../Frameworks'; then
-    /usr/bin/install_name_tool -add_rpath "@executable_path/../Frameworks" "$contents/MacOS/CellularBridge"
+if ! /usr/bin/otool -l "$contents/MacOS/DJIO" | /usr/bin/grep -q '@executable_path/../Frameworks'; then
+    /usr/bin/install_name_tool -add_rpath "@executable_path/../Frameworks" "$contents/MacOS/DJIO"
 fi
 
 /usr/bin/plutil -lint "$contents/Info.plist"

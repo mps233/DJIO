@@ -1,10 +1,10 @@
-# Third-party notices
+# 第三方软件声明
 
-CellularBridge dynamically links and bundles libusb 1.0.30.
+DJIO 动态链接并随应用打包 libusb 1.0.30。
 
-- Project: https://libusb.info/
-- License: GNU Lesser General Public License v2.1 or later
-- Source: https://github.com/libusb/libusb
+- 项目：https://libusb.info/
+- 许可证：GNU Lesser General Public License v2.1 或更高版本
+- 源代码：https://github.com/libusb/libusb
 
-The packaged application includes the libusb license text under
-`Contents/Resources/Licenses/libusb-LGPL-2.1.txt`.
+打包后的应用会将 libusb 许可证文本放在
+`Contents/Resources/Licenses/libusb-LGPL-2.1.txt`。

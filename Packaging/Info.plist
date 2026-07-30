@@ -5,15 +5,15 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>zh_CN</string>
     <key>CFBundleDisplayName</key>
-    <string>蜂窝桥</string>
+    <string>DJIO</string>
     <key>CFBundleExecutable</key>
-    <string>CellularBridge</string>
+    <string>DJIO</string>
     <key>CFBundleIdentifier</key>
     <string>com.local.CellularBridge</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>CellularBridge</string>
+    <string>DJIO</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
