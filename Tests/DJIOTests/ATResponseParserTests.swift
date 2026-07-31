@@ -10,6 +10,48 @@ struct ATResponseParserTests {
     #expect(ATResponseParser().sentMessageReference(from: "\r\nOK\r\n") == nil)
   }
 
+  @Test func parsesUSBDeviceConfiguration() {
+    let response =
+      "\r\n+QCFG: \"usbcfg\",0x2CA3,0x4006,1,1,1,1,1,0,0\r\n\r\nOK\r\n"
+
+    #expect(
+      ATResponseParser().usbDeviceConfiguration(from: response)
+        == .djiFirstGenerationFactory
+    )
+    #expect(ATResponseParser().usbDeviceConfiguration(from: "\r\nOK\r\n") == nil)
+  }
+
+  @Test func parsesUSBNetworkMode() {
+    #expect(
+      ATResponseParser().usbNetworkMode(
+        from: "\r\n+QCFG: \"usbnet\",0\r\n\r\nOK\r\n"
+      ) == 0
+    )
+    #expect(
+      ATResponseParser().usbNetworkMode(
+        from: "\r\n+QCFG: \"usbnet\",broken\r\n\r\nOK\r\n"
+      ) == nil
+    )
+  }
+
+  @Test func parsesEquipmentIdentity() {
+    #expect(
+      ATResponseParser().equipmentIdentity(
+        from: "\r\nAT+CGSN\r\n867530900000001\r\nOK\r\n"
+      ) == "867530900000001"
+    )
+    #expect(
+      ATResponseParser().equipmentIdentity(
+        from: "\r\n+CGSN: \"867530900000002\"\r\nOK\r\n"
+      ) == "867530900000002"
+    )
+    #expect(
+      ATResponseParser().equipmentIdentity(
+        from: "\r\n+CGSN: \"not-an-imei\"\r\nOK\r\n"
+      ) == nil
+    )
+  }
+
   private let parser = ATResponseParser()
 
   @Test func parsesCMGLRecordsAndKeepsIndexes() {
@@ -63,6 +105,10 @@ struct ATResponseParserTests {
     #expect(parser.registration(from: "+CEREG: 0,5\r\nOK") == "漫游")
     #expect(parser.registration(from: "+CEREG: 2,1,\"01AB\",\"00112233\",7\r\nOK") == "已注册")
     #expect(parser.operatorName(from: "+COPS: 0,0,\"中国移动\",7\r\nOK") == "中国移动")
+    #expect(parser.operatorName(from: "+COPS: 0,0,\"CHN-CT\",7\r\nOK") == "中国电信")
+    #expect(parser.operatorName(from: "+COPS: 0,0,\"CHN-CU\",7\r\nOK") == "中国联通")
+    #expect(parser.operatorName(from: "+COPS: 0,0,\"CHN-CM\",7\r\nOK") == "中国移动")
+    #expect(parser.operatorName(from: "+COPS: 0,0,\"CHN-CBN\",7\r\nOK") == "中国广电")
   }
 
   @Test func parsesOnlyIncomingVoiceCallsFromCLCC() {

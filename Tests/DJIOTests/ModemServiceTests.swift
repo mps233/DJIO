@@ -10,6 +10,9 @@ struct ModemServiceTests {
   private let secondMultipartPDU = "00440491214300084210102143650008050003AA0202597D"
   private let usbIdentityCommand =
     "AT+QCFG=\"usbcfg\",0x2C7C,0x0125,1,1,1,1,1,0,0"
+  private let factoryIdentityRestoreCommand =
+    "AT+QCFG=\"usbcfg\",0x2CA3,0x4006,1,1,1,1,1,0,0"
+  private let usbConfigurationQueryCommand = "AT+QCFG=\"usbcfg\""
 
   @Test func importsOnceAndUsesOnlyExactIndexCleanup() async throws {
     let (root, databaseURL) = temporaryDatabase()
@@ -461,6 +464,439 @@ struct ModemServiceTests {
     #expect(await transport.disconnectCount() == 1)
   }
 
+  @Test func convertedIdentityRestoresAndVerifiesFactoryIdentityBeforeRestart() async throws {
+    let (root, databaseURL) = temporaryDatabase()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let transport = FakeATTransport(descriptor: usbDescriptor(.quectelEC25))
+    await transport.failNext(
+      command: "AT+CFUN=1,1",
+      with: .disconnected("测试模块软重启")
+    )
+    let service = try ModemService(databaseURL: databaseURL, transport: transport)
+
+    let result = try await service.restoreFactoryUSBIdentity(authorized: true)
+
+    let configurationCommands = await transport.recordedTimeline().filter {
+      $0.hasPrefix("AT+QCFG=\"usbcfg\"")
+        || $0.hasPrefix("AT+QCFG=\"usbnet\"")
+        || $0 == "AT+CFUN=1,1"
+    }
+    #expect(
+      configurationCommands == [
+        factoryIdentityRestoreCommand,
+        usbConfigurationQueryCommand,
+        "AT+CFUN=1,1",
+      ])
+    #expect(
+      result
+        == USBIdentityRestoreResult(
+          expectedUSBIdentity: .djiFirstGenerationFactory,
+          target: restoreTarget()
+        ))
+    #expect(await transport.disconnectCount() == 1)
+  }
+
+  @Test func readsCurrentUSBEquipmentIdentityForExpectedDevice() async throws {
+    let (root, databaseURL) = temporaryDatabase()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let transport = FakeATTransport(
+      descriptor: usbDescriptor(.djiFirstGenerationFactory),
+      equipmentIdentity: "867530900000123"
+    )
+    let service = try ModemService(databaseURL: databaseURL, transport: transport)
+
+    let equipmentIdentity = try await service.currentUSBEquipmentIdentity(
+      expectedUSBIdentity: .djiFirstGenerationFactory
+    )
+
+    #expect(equipmentIdentity == "867530900000123")
+    #expect(await transport.recordedTimeline().contains("AT+CGSN"))
+  }
+
+  @Test func doesNotReadEquipmentIdentityFromUnexpectedUSBDevice() async throws {
+    let (root, databaseURL) = temporaryDatabase()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let transport = FakeATTransport(descriptor: usbDescriptor(.quectelEC25))
+    let service = try ModemService(databaseURL: databaseURL, transport: transport)
+
+    let equipmentIdentity = try await service.currentUSBEquipmentIdentity(
+      expectedUSBIdentity: .djiFirstGenerationFactory
+    )
+
+    #expect(equipmentIdentity == nil)
+    #expect(!((await transport.recordedTimeline()).contains("AT+CGSN")))
+  }
+
+  @Test func factoryIdentityRestoreRequiresExplicitAuthorization() async throws {
+    let (root, databaseURL) = temporaryDatabase()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let transport = FakeATTransport(descriptor: usbDescriptor(.quectelEC25))
+    let service = try ModemService(databaseURL: databaseURL, transport: transport)
+
+    await #expect(throws: USBIdentityRestoreError.self) {
+      _ = try await service.restoreFactoryUSBIdentity(authorized: false)
+    }
+
+    let commands = await transport.recordedBatches().flatMap { $0 }
+    #expect(!commands.contains(factoryIdentityRestoreCommand))
+    #expect(!commands.contains("AT+CFUN=1,1"))
+  }
+
+  @Test func factoryIdentityRestoreRejectsUnexpectedUSBIdentity() async throws {
+    let (root, databaseURL) = temporaryDatabase()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let transport = FakeATTransport(
+      descriptor: usbDescriptor(.djiFirstGenerationFactory)
+    )
+    let service = try ModemService(databaseURL: databaseURL, transport: transport)
+
+    do {
+      _ = try await service.restoreFactoryUSBIdentity(authorized: true)
+      Issue.record("非 2C7C:0125 设备不应执行恢复")
+    } catch let error as USBIdentityRestoreError {
+      guard case .unsupportedCurrentIdentity(let identifier) = error else {
+        Issue.record("预期 USB 标识不受支持，实际为 \(error)")
+        return
+      }
+      #expect(identifier == .djiFirstGenerationFactory)
+    }
+
+    let commands = await transport.recordedBatches().flatMap { $0 }
+    #expect(!commands.contains(factoryIdentityRestoreCommand))
+    #expect(!commands.contains("AT+CFUN=1,1"))
+  }
+
+  @Test func factoryIdentityRestoreRejectsSerialTransportWithoutUSBIdentity() async throws {
+    let (root, databaseURL) = temporaryDatabase()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let transport = FakeATTransport()
+    let service = try ModemService(databaseURL: databaseURL, transport: transport)
+
+    do {
+      _ = try await service.restoreFactoryUSBIdentity(authorized: true)
+      Issue.record("无法确认 USB 标识时不应执行恢复")
+    } catch let error as USBIdentityRestoreError {
+      guard case .unsupportedCurrentIdentity(let identifier) = error else {
+        Issue.record("预期 USB 标识不受支持，实际为 \(error)")
+        return
+      }
+      #expect(identifier == nil)
+    }
+
+    let commands = await transport.recordedBatches().flatMap { $0 }
+    #expect(!commands.contains(factoryIdentityRestoreCommand))
+    #expect(!commands.contains("AT+CFUN=1,1"))
+  }
+
+  @Test func failedFactoryIdentityRestoreStopsBeforeRestart() async throws {
+    let (root, databaseURL) = temporaryDatabase()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let transport = FakeATTransport(descriptor: usbDescriptor(.quectelEC25))
+    await transport.failNext(
+      command: factoryIdentityRestoreCommand,
+      with: .modemRejected(command: factoryIdentityRestoreCommand, response: "ERROR")
+    )
+    let service = try ModemService(databaseURL: databaseURL, transport: transport)
+
+    await #expect(throws: ModemTransportError.self) {
+      _ = try await service.restoreFactoryUSBIdentity(authorized: true)
+    }
+
+    let configurationCommands = await transport.recordedTimeline().filter {
+      $0 == factoryIdentityRestoreCommand
+        || $0 == usbConfigurationQueryCommand
+        || $0 == "AT+CFUN=1,1"
+    }
+    #expect(configurationCommands == [factoryIdentityRestoreCommand])
+    #expect(await transport.disconnectCount() == 1)
+  }
+
+  @Test func factoryIdentityRestoreReportsWriteTimeoutAsUnknown() async throws {
+    let (root, databaseURL) = temporaryDatabase()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let transport = FakeATTransport(descriptor: usbDescriptor(.quectelEC25))
+    await transport.failNext(
+      command: factoryIdentityRestoreCommand,
+      with: .timeout(command: factoryIdentityRestoreCommand, detail: "测试结果未知")
+    )
+    let service = try ModemService(databaseURL: databaseURL, transport: transport)
+
+    do {
+      _ = try await service.restoreFactoryUSBIdentity(authorized: true)
+      Issue.record("恢复指令超时不应报告成功")
+    } catch let error as USBIdentityRestoreError {
+      guard case .identityRewriteOutcomeUnknown = error else {
+        Issue.record("预期恢复结果未知，实际为 \(error)")
+        return
+      }
+      #expect(error.expectedUSBIdentity == .djiFirstGenerationFactory)
+      #expect(error.shouldVerifyIdentityRestore)
+      #expect(error.shouldWaitForReenumeration)
+    }
+
+    let configurationCommands = await transport.recordedTimeline().filter {
+      $0 == factoryIdentityRestoreCommand
+        || $0 == usbConfigurationQueryCommand
+        || $0 == "AT+CFUN=1,1"
+    }
+    #expect(configurationCommands == [factoryIdentityRestoreCommand])
+    #expect(await transport.disconnectCount() == 1)
+  }
+
+  @Test func factoryIdentityRestoreReportsRestartTimeoutAsUnknown() async throws {
+    let (root, databaseURL) = temporaryDatabase()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let transport = FakeATTransport(descriptor: usbDescriptor(.quectelEC25))
+    await transport.failNext(
+      command: "AT+CFUN=1,1",
+      with: .timeout(command: "AT+CFUN=1,1", detail: "测试重新枚举")
+    )
+    let service = try ModemService(databaseURL: databaseURL, transport: transport)
+
+    do {
+      _ = try await service.restoreFactoryUSBIdentity(authorized: true)
+      Issue.record("模块重启超时不应报告恢复成功")
+    } catch let error as USBIdentityRestoreError {
+      guard case .restartOutcomeUnknown = error else {
+        Issue.record("预期重启结果未知，实际为 \(error)")
+        return
+      }
+      #expect(error.expectedUSBIdentity == .djiFirstGenerationFactory)
+      #expect(error.shouldVerifyIdentityRestore)
+      #expect(error.shouldWaitForReenumeration)
+    }
+
+    let configurationCommands = await transport.recordedTimeline().filter {
+      $0 == factoryIdentityRestoreCommand
+        || $0 == usbConfigurationQueryCommand
+        || $0 == "AT+CFUN=1,1"
+    }
+    #expect(
+      configurationCommands == [
+        factoryIdentityRestoreCommand,
+        usbConfigurationQueryCommand,
+        "AT+CFUN=1,1",
+      ])
+    #expect(await transport.disconnectCount() == 1)
+  }
+
+  @Test func factoryIdentityRestoreReportsRestartIOAsUnknown() async throws {
+    let (root, databaseURL) = temporaryDatabase()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let transport = FakeATTransport(descriptor: usbDescriptor(.quectelEC25))
+    await transport.failNext(
+      command: "AT+CFUN=1,1",
+      with: .io("测试重启时 USB 写入中断")
+    )
+    let service = try ModemService(databaseURL: databaseURL, transport: transport)
+
+    do {
+      _ = try await service.restoreFactoryUSBIdentity(authorized: true)
+      Issue.record("重启时 I/O 中断不应被报告为确定失败")
+    } catch let error as USBIdentityRestoreError {
+      guard case .restartOutcomeUnknown = error else {
+        Issue.record("预期重启结果未知，实际为 \(error)")
+        return
+      }
+      #expect(error.target == restoreTarget())
+      #expect(error.shouldWaitForReenumeration)
+    }
+  }
+
+  @Test func factoryIdentityRestoreStopsBeforeWriteWhenIMEIIsUnavailable() async throws {
+    let (root, databaseURL) = temporaryDatabase()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let transport = FakeATTransport(
+      descriptor: usbDescriptor(.quectelEC25),
+      equipmentIdentity: "unknown"
+    )
+    let service = try ModemService(databaseURL: databaseURL, transport: transport)
+
+    await #expect(throws: USBIdentityRestoreError.self) {
+      _ = try await service.restoreFactoryUSBIdentity(authorized: true)
+    }
+
+    let commands = await transport.recordedTimeline()
+    #expect(commands.contains("AT+CGSN"))
+    #expect(!commands.contains(factoryIdentityRestoreCommand))
+    #expect(!commands.contains("AT+CFUN=1,1"))
+  }
+
+  @Test func factoryIdentityRestoresPrivateUSBModeWithoutExtraRestart() async throws {
+    let (root, databaseURL) = temporaryDatabase()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let transport = FakeATTransport(
+      descriptor: usbDescriptor(.djiFirstGenerationFactory)
+    )
+    await transport.failNext(
+      command: "AT+QCFG=\"usbnet\",0",
+      with: .disconnected("测试 USB 模式重新枚举")
+    )
+    let service = try ModemService(databaseURL: databaseURL, transport: transport)
+
+    let result = try await service.restoreFactoryUSBNetworkMode(
+      authorized: true,
+      expectedEquipmentIdentity: "867530900000001"
+    )
+
+    let configurationCommands = await transport.recordedTimeline().filter {
+      $0.hasPrefix("AT+QCFG=\"usbnet\"") || $0 == "AT+CFUN=1,1"
+    }
+    #expect(
+      configurationCommands == [
+        "AT+QCFG=\"usbnet\"",
+        "AT+QCFG=\"usbnet\",0",
+      ])
+    #expect(
+      result
+        == USBNetworkModeRestoreResult(
+          expectedUSBIdentity: .djiFirstGenerationFactory,
+          expectedUSBNetworkMode: 0,
+          didChangeMode: true,
+          target: restoreTarget()
+        ))
+    #expect(await transport.disconnectCount() == 1)
+  }
+
+  @Test func factoryPrivateUSBModeRestoreIsIdempotent() async throws {
+    let (root, databaseURL) = temporaryDatabase()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let transport = FakeATTransport(
+      descriptor: usbDescriptor(.djiFirstGenerationFactory),
+      usbNetworkMode: 0
+    )
+    let service = try ModemService(databaseURL: databaseURL, transport: transport)
+
+    let result = try await service.restoreFactoryUSBNetworkMode(authorized: true)
+
+    let configurationCommands = await transport.recordedTimeline().filter {
+      $0.hasPrefix("AT+QCFG=\"usbnet\"") || $0 == "AT+CFUN=1,1"
+    }
+    #expect(configurationCommands == ["AT+QCFG=\"usbnet\""])
+    #expect(!result.didChangeMode)
+    #expect(result.expectedUSBNetworkMode == 0)
+    #expect(await transport.disconnectCount() == 0)
+  }
+
+  @Test func factoryPrivateUSBModeRestoreRequiresExplicitAuthorization() async throws {
+    let (root, databaseURL) = temporaryDatabase()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let transport = FakeATTransport(
+      descriptor: usbDescriptor(.djiFirstGenerationFactory)
+    )
+    let service = try ModemService(databaseURL: databaseURL, transport: transport)
+
+    await #expect(throws: USBNetworkModeRestoreError.self) {
+      _ = try await service.restoreFactoryUSBNetworkMode(authorized: false)
+    }
+
+    let commands = await transport.recordedBatches().flatMap { $0 }
+    #expect(!commands.contains("AT+QCFG=\"usbnet\""))
+    #expect(!commands.contains("AT+QCFG=\"usbnet\",0"))
+    #expect(!commands.contains("AT+CFUN=1,1"))
+  }
+
+  @Test func factoryPrivateUSBModeRestoreRejectsConvertedIdentity() async throws {
+    let (root, databaseURL) = temporaryDatabase()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let transport = FakeATTransport(descriptor: usbDescriptor(.quectelEC25))
+    let service = try ModemService(databaseURL: databaseURL, transport: transport)
+
+    do {
+      _ = try await service.restoreFactoryUSBNetworkMode(authorized: true)
+      Issue.record("恢复大疆标识前不应写入私有 USB 模式")
+    } catch let error as USBNetworkModeRestoreError {
+      guard case .unsupportedCurrentIdentity(let identifier) = error else {
+        Issue.record("预期 USB 标识不受支持，实际为 \(error)")
+        return
+      }
+      #expect(identifier == .quectelEC25)
+    }
+
+    let commands = await transport.recordedBatches().flatMap { $0 }
+    #expect(!commands.contains("AT+QCFG=\"usbnet\""))
+    #expect(!commands.contains("AT+QCFG=\"usbnet\",0"))
+  }
+
+  @Test func factoryPrivateUSBModeRestoreRejectsADifferentModule() async throws {
+    let (root, databaseURL) = temporaryDatabase()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let transport = FakeATTransport(
+      descriptor: usbDescriptor(.djiFirstGenerationFactory),
+      equipmentIdentity: "867530900000002"
+    )
+    let service = try ModemService(databaseURL: databaseURL, transport: transport)
+
+    do {
+      _ = try await service.restoreFactoryUSBNetworkMode(
+        authorized: true,
+        expectedEquipmentIdentity: "867530900000001"
+      )
+      Issue.record("不应对重新连接后的另一只模块写入持久模式")
+    } catch let error as USBNetworkModeRestoreError {
+      guard case .differentDevice = error else {
+        Issue.record("预期模块身份不匹配，实际为 \(error)")
+        return
+      }
+    }
+
+    let commands = await transport.recordedTimeline()
+    #expect(commands.contains("AT+CGSN"))
+    #expect(!commands.contains("AT+QCFG=\"usbnet\""))
+    #expect(!commands.contains("AT+QCFG=\"usbnet\",0"))
+  }
+
+  @Test func factoryPrivateUSBModeRestoreReportsTimeoutAsUnknown() async throws {
+    let (root, databaseURL) = temporaryDatabase()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let transport = FakeATTransport(
+      descriptor: usbDescriptor(.djiFirstGenerationFactory)
+    )
+    await transport.failNext(
+      command: "AT+QCFG=\"usbnet\",0",
+      with: .timeout(command: "AT+QCFG=\"usbnet\",0", detail: "测试结果未知")
+    )
+    let service = try ModemService(databaseURL: databaseURL, transport: transport)
+
+    do {
+      _ = try await service.restoreFactoryUSBNetworkMode(authorized: true)
+      Issue.record("usbnet 恢复超时不应报告成功")
+    } catch let error as USBNetworkModeRestoreError {
+      guard case .outcomeUnknown = error else {
+        Issue.record("预期私有模式恢复结果未知，实际为 \(error)")
+        return
+      }
+      #expect(error.expectedUSBIdentity == .djiFirstGenerationFactory)
+      #expect(error.expectedUSBNetworkMode == 0)
+      #expect(error.shouldVerifyNetworkModeRestore)
+      #expect(error.shouldWaitForReenumeration)
+    }
+
+    let configurationCommands = await transport.recordedTimeline().filter {
+      $0.hasPrefix("AT+QCFG=\"usbnet\"") || $0 == "AT+CFUN=1,1"
+    }
+    #expect(
+      configurationCommands == [
+        "AT+QCFG=\"usbnet\"",
+        "AT+QCFG=\"usbnet\",0",
+      ])
+    #expect(await transport.disconnectCount() == 1)
+  }
+
+  @Test func pollReportsCurrentUSBNetworkMode() async throws {
+    let (root, databaseURL) = temporaryDatabase()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let transport = FakeATTransport(
+      descriptor: usbDescriptor(.djiFirstGenerationFactory),
+      usbNetworkMode: 0
+    )
+    let service = try ModemService(databaseURL: databaseURL, transport: transport)
+
+    let result = try await service.poll()
+
+    #expect(result.usbNetworkMode == 0)
+  }
+
   @Test func passesAllSupportedUSBDevicesInPriorityOrder() async throws {
     let (root, databaseURL) = temporaryDatabase()
     defer { try? FileManager.default.removeItem(at: root) }
@@ -658,15 +1094,23 @@ struct ModemServiceTests {
       }
       return nil
     }
+    let endEvents = await service.incomingMessages()
+    let endedCall = Task { () -> String? in
+      for await event in endEvents {
+        if case .incomingCallEnded(let callID) = event { return callID }
+      }
+      return nil
+    }
 
     await transport.emit(raw: "RING")
     let call = try #require(await receivedCall.value)
     await transport.emit(raw: "RING")
     await transport.emit(raw: "+CLIP: \"8613800138000\",145,,,,0")
     await transport.emit(raw: "NO CARRIER")
-    try await Task.sleep(for: .milliseconds(50))
+    let endedCallID = try #require(await endedCall.value)
 
     #expect(call.callerNumber == "+8613800138000")
+    #expect(endedCallID == call.id)
     let storedCalls = try await service.calls()
     #expect(storedCalls.count == 1)
     #expect(storedCalls.first?.id == call.id)
@@ -678,6 +1122,63 @@ struct ModemServiceTests {
     let commands = await transport.recordedBatches().flatMap { $0 }
     #expect(commands.filter { $0 == "AT+CLCC" }.count == 1)
     #expect(commands.contains("AT+CLIP=1"))
+  }
+
+  @Test func hangsUpIncomingCallAndPublishesTermination() async throws {
+    let (root, databaseURL) = temporaryDatabase()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let transport = FakeATTransport()
+    let service = try ModemService(databaseURL: databaseURL, transport: transport)
+    let incomingEvents = await service.incomingMessages()
+    let incomingCall = Task { () -> IncomingCallRecord? in
+      for await event in incomingEvents {
+        if case .incomingCall(let call) = event { return call }
+      }
+      return nil
+    }
+    let terminationEvents = await service.incomingMessages()
+    let terminatedCall = Task { () -> String? in
+      for await event in terminationEvents {
+        if case .incomingCallEnded(let callID) = event { return callID }
+      }
+      return nil
+    }
+
+    await transport.emit(raw: "+CLIP: \"10086\",129")
+    let call = try #require(await incomingCall.value)
+    try await service.hangUpIncomingCall()
+
+    #expect(await terminatedCall.value == call.id)
+    let commands = await transport.recordedBatches().flatMap { $0 }
+    #expect(commands.contains("AT+CHUP"))
+    #expect(!commands.contains("ATH"))
+  }
+
+  @Test func fallsBackToATHWhenCHUPIsRejected() async throws {
+    let (root, databaseURL) = temporaryDatabase()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let transport = FakeATTransport()
+    await transport.failNext(
+      command: "AT+CHUP",
+      with: .modemRejected(command: "AT+CHUP", response: "ERROR")
+    )
+    let service = try ModemService(databaseURL: databaseURL, transport: transport)
+    let events = await service.incomingMessages()
+    let incomingCall = Task { () -> IncomingCallRecord? in
+      for await event in events {
+        if case .incomingCall(let call) = event { return call }
+      }
+      return nil
+    }
+
+    await transport.emit(raw: "+CLIP: \"10010\",129")
+    _ = try #require(await incomingCall.value)
+    try await service.hangUpIncomingCall()
+
+    let commands = await transport.recordedBatches().flatMap { $0 }
+    let primary = try #require(commands.firstIndex(of: "AT+CHUP"))
+    let fallback = try #require(commands.firstIndex(of: "ATH"))
+    #expect(primary < fallback)
   }
 
   @Test func lateCallerIDUpdatesUnknownCallWithoutDuplicatingIt() async throws {
@@ -934,6 +1435,15 @@ struct ModemServiceTests {
       ))
   }
 
+  private func restoreTarget(
+    equipmentIdentity: String = "867530900000001"
+  ) -> USBRestoreTarget {
+    USBRestoreTarget(
+      equipmentIdentity: equipmentIdentity,
+      enumerationIdentifier: USBEnumerationIdentifier(bus: 1, address: 2)
+    )
+  }
+
   private func cmgl(_ records: [(Int, Int, String)]) -> String {
     records.map { index, status, pdu in
       "+CMGL: \(index),\(status),,\(pdu.count / 2)\r\n\(pdu)"
@@ -959,8 +1469,10 @@ private actor OutgoingUpdateRecorder {
 
 private actor FakeATTransport: ATTransporting {
   private let descriptor: ATTransportDescriptor
+  private let equipmentIdentityResponse: String
   private var smResponse: String
   private var meResponse: String
+  private var usbNetworkModeResponse: String
   private var simResponse = "\r\n+CPIN: READY\r\nOK\r\n"
   private var batches: [[String]] = []
   private var failures: [String: [ModemTransportError]] = [:]
@@ -985,11 +1497,16 @@ private actor FakeATTransport: ATTransporting {
       sessionID: UUID()
     ),
     smResponse: String = "\r\nOK\r\n",
-    meResponse: String = "\r\nOK\r\n"
+    meResponse: String = "\r\nOK\r\n",
+    usbNetworkMode: Int = 1,
+    equipmentIdentity: String = "867530900000001"
   ) {
     self.descriptor = descriptor
     self.smResponse = smResponse
     self.meResponse = meResponse
+    equipmentIdentityResponse = "\r\n\(equipmentIdentity)\r\nOK\r\n"
+    usbNetworkModeResponse =
+      "\r\n+QCFG: \"usbnet\",\(usbNetworkMode)\r\n\r\nOK\r\n"
   }
 
   func connect(
@@ -1048,6 +1565,11 @@ private actor FakeATTransport: ATTransporting {
       case "AT+COPS?": raw = "\r\n+COPS: 0,0,\"Test Carrier\",7\r\nOK\r\n"
       case "AT+CPIN?": raw = simResponse
       case "AT+CGMR": raw = "\r\nEG25GGBR07A08M2G\r\nOK\r\n"
+      case "AT+CGSN": raw = equipmentIdentityResponse
+      case "AT+QCFG=\"usbcfg\"":
+        raw =
+          "\r\n+QCFG: \"usbcfg\",0x2CA3,0x4006,1,1,1,1,1,0,0\r\n\r\nOK\r\n"
+      case "AT+QCFG=\"usbnet\"": raw = usbNetworkModeResponse
       case "AT+QNWINFO":
         raw = "\r\n+QNWINFO: \"FDD LTE\",\"46000\",\"LTE BAND 3\",1300\r\nOK\r\n"
       case "AT+QENG=\"servingcell\"":

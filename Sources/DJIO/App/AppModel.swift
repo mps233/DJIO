@@ -21,16 +21,19 @@ final class AppModel: ObservableObject {
     didSet { updateUnreadIndicators() }
   }
   @Published private(set) var incomingCalls: [IncomingCallRecord] = []
+  @Published private(set) var presentedIncomingCall: IncomingCallRecord?
   @Published private(set) var outbox: [OutgoingSMS] = []
   @Published private(set) var isSendingMessage = false
   @Published private(set) var sendingOutgoingMessageID: String?
   @Published private(set) var outgoingMessageIssue: String?
   @Published var selectedMessageID: String?
   @Published private(set) var messageNavigationRequestID: String?
+  @Published private(set) var messageCompositionRequest: MessageCompositionRequest?
   @Published var isRefreshing = false {
     didSet { menuBarStatus.updateRefreshing(isRefreshing) }
   }
   @Published var isSwitchingMode = false
+  @Published private(set) var modeSwitchDestination: ModuleUsageMode?
   @Published var showingModeConfirmation = false
   @Published private(set) var modeConfirmationAllowsFactoryIdentityRewrite = false
   @Published var preferredInterface: String?
@@ -55,12 +58,43 @@ final class AppModel: ObservableObject {
   private var refreshInProgress = false
   private var pendingForegroundRefresh = false
   private var operationRevision: UInt64 = 0
-  private struct PendingECMModeSwitchVerification {
+  private enum PendingModemConfigurationPurpose {
+    case ecm
+    case factoryIdentity
+    case factoryNetworkMode
+  }
+
+  private enum ModemConfigurationWaitResult {
+    case matched
+    case differentDevice
+    case timedOut
+    case cancelled
+  }
+
+  private struct PendingModemConfigurationVerification {
     let expectedUSBIdentity: USBDeviceIdentifier?
+    let previousUSBEnumerationIdentifier: USBEnumerationIdentifier?
+    let expectedUSBNetworkMode: Int?
+    let expectedEquipmentIdentity: String?
+    let purpose: PendingModemConfigurationPurpose
     let pendingIssue: String?
   }
 
-  private var pendingECMModeSwitchVerification: PendingECMModeSwitchVerification?
+  private var pendingModemConfigurationVerification: PendingModemConfigurationVerification?
+  private var pendingFactoryRestoreTarget: USBRestoreTarget?
+  private var factoryRestoreContinuationTask: Task<Void, Never>?
+
+  private static let currentBundleIdentifier = "com.local.DJIO"
+  private static let legacyBundleIdentifier = "com.local.CellularBridge"
+  private static let migratedDefaultsKey = "didMigrateCellularBridgeDefaults"
+  private static let migratedDefaultsKeys = [
+    "preferredInterface",
+    "preferredSerialPath",
+    "apn",
+    "notificationsEnabled",
+    "deletesImportedMessages",
+    "pollInterval",
+  ]
 
   var unreadCount: Int { messages.filter { !$0.isRead }.count }
 
@@ -75,6 +109,9 @@ final class AppModel: ObservableObject {
     trafficUsage = trafficUsageTracker.snapshot
     trafficPersistenceIssue = trafficUsageTracker.persistenceIssue
     let defaults = UserDefaults.standard
+    if Bundle.main.bundleIdentifier == Self.currentBundleIdentifier {
+      Self.migrateLegacyDefaultsIfNeeded(to: defaults)
+    }
     preferredInterface = defaults.string(forKey: "preferredInterface")
     preferredSerialPath = defaults.string(forKey: "preferredSerialPath") ?? ""
     apn = defaults.string(forKey: "apn") ?? ""
@@ -94,6 +131,16 @@ final class AppModel: ObservableObject {
     }
     if isDemoMode {
       installDemoState()
+      if ProcessInfo.processInfo.arguments.contains("--preview-connection") {
+        selection = .connection
+      }
+      if ProcessInfo.processInfo.arguments.contains("--preview-incoming-call") {
+        presentedIncomingCall = IncomingCallRecord(
+          id: "preview-incoming-call",
+          callerNumber: "15342284706",
+          receivedAt: Date()
+        )
+      }
     }
     refreshLaunchAtLoginStatus()
     self.menuBarStatus.update(connection: connection)
@@ -111,6 +158,11 @@ final class AppModel: ObservableObject {
 
   func start() {
     guard pollingTask == nil else { return }
+    if notificationsEnabled {
+      Task { [weak self] in
+        await self?.updateNotifications(true)
+      }
+    }
     startTrafficMonitoring()
     startIncomingMessageMonitoring()
     pollingTask = Task { [weak self] in
@@ -137,6 +189,17 @@ final class AppModel: ObservableObject {
     }
   }
 
+  private static func migrateLegacyDefaultsIfNeeded(to defaults: UserDefaults) {
+    guard !defaults.bool(forKey: migratedDefaultsKey) else { return }
+    if let legacyDefaults = UserDefaults(suiteName: legacyBundleIdentifier) {
+      for key in migratedDefaultsKeys where defaults.object(forKey: key) == nil {
+        guard let value = legacyDefaults.object(forKey: key) else { continue }
+        defaults.set(value, forKey: key)
+      }
+    }
+    defaults.set(true, forKey: migratedDefaultsKey)
+  }
+
   func stop() {
     operationRevision &+= 1
     pollingTask?.cancel()
@@ -149,6 +212,8 @@ final class AppModel: ObservableObject {
     sendingOutgoingMessageID = nil
     trafficTask?.cancel()
     trafficTask = nil
+    factoryRestoreContinuationTask?.cancel()
+    factoryRestoreContinuationTask = nil
     trafficSampler.reset()
     traffic = .unavailable
     trafficUsage = trafficUsageTracker.sample(interfaceName: nil, counters: nil)
@@ -160,6 +225,9 @@ final class AppModel: ObservableObject {
   }
 
   func refresh(showActivity: Bool = true, allowDuringModeSwitch: Bool = false) async {
+    if showActivity {
+      isRefreshing = true
+    }
     guard allowDuringModeSwitch || !isSwitchingMode else {
       pendingForegroundRefresh = pendingForegroundRefresh || showActivity
       return
@@ -170,12 +238,9 @@ final class AppModel: ObservableObject {
     }
     let revision = operationRevision
     refreshInProgress = true
-    if showActivity {
-      isRefreshing = true
-    }
     defer {
       refreshInProgress = false
-      if showActivity {
+      if showActivity, !pendingForegroundRefresh {
         isRefreshing = false
       }
       schedulePendingForegroundRefreshIfPossible()
@@ -220,6 +285,8 @@ final class AppModel: ObservableObject {
       connection.device = .ready
       connection.control = .ready
       connection.usbDeviceIdentifier = result.transport.usbDeviceIdentifier
+      connection.usbEnumerationIdentifier = result.transport.usbEnumerationIdentifier
+      connection.usbNetworkMode = result.usbNetworkMode
       connection.transportDescription = result.transport.summary
       connection.signalRSSI = result.signalRSSI
       connection.registration = result.registration
@@ -227,10 +294,15 @@ final class AppModel: ObservableObject {
       connection.cellularDetails = result.cellularDetails
       connection.cellular = ["已注册", "漫游"].contains(result.registration) ? .ready : .warning
       connection.lastUpdated = Date()
-      let modeSwitchIssue = pendingModeSwitchIssue(
-        observedUSBIdentity: result.transport.usbDeviceIdentifier
+      let modeSwitchIssue = await pendingModemConfigurationIssue(
+        observedUSBIdentity: result.transport.usbDeviceIdentifier,
+        revision: revision
       )
-      connection.issue = modeSwitchIssue ?? result.warnings.first ?? networkIssue
+      guard revision == operationRevision else { return }
+      connection.issue =
+        modeSwitchIssue
+        ?? result.warnings.first
+        ?? (result.usbNetworkMode == 0 ? nil : networkIssue)
       if !result.newMessages.isEmpty {
         await loadMessages()
         for message in result.newMessages where !message.isRead {
@@ -251,6 +323,8 @@ final class AppModel: ObservableObject {
       connection.control = .unavailable
       connection.cellular = .unavailable
       connection.usbDeviceIdentifier = nil
+      connection.usbEnumerationIdentifier = nil
+      connection.usbNetworkMode = nil
       connection.cellularDetails = CellularDetails()
       connection.transportDescription = "等待 AT 通道"
       connection.issue = transportIssue
@@ -263,13 +337,34 @@ final class AppModel: ObservableObject {
     showingModeConfirmation = true
   }
 
+  func restoreDJIFactoryUSBConfigurationFromCurrentState() async {
+    let plan: DJIFactoryUSBRestorePlan?
+    if connection.usbDeviceIdentifier == .quectelEC25 {
+      plan = .identityAndNetworkMode
+    } else if connection.usbDeviceIdentifier == .djiFirstGenerationFactory,
+      connection.usbNetworkMode != 0
+    {
+      plan = .networkModeOnly
+    } else {
+      plan = nil
+    }
+    guard let plan else { return }
+    await restoreDJIFactoryUSBConfiguration(plan: plan)
+  }
+
   func switchToECM(allowFactoryIdentityRewrite: Bool) async {
     guard !isSwitchingMode, !isSendingMessage else { return }
+    factoryRestoreContinuationTask?.cancel()
+    factoryRestoreContinuationTask = nil
+    pendingFactoryRestoreTarget = nil
+    pendingModemConfigurationVerification = nil
     operationRevision &+= 1
     let revision = operationRevision
     isSwitchingMode = true
+    modeSwitchDestination = .ecm
     defer {
       isSwitchingMode = false
+      modeSwitchDestination = nil
       schedulePendingForegroundRefreshIfPossible()
       resumeQueuedMessagesIfNeeded()
     }
@@ -277,6 +372,10 @@ final class AppModel: ObservableObject {
     if isDemoMode {
       try? await Task.sleep(nanoseconds: 900_000_000)
       guard revision == operationRevision else { return }
+      connection.usbDeviceIdentifier = .quectelEC25
+      connection.usbNetworkMode = 1
+      connection.transportDescription =
+        "USB AT · 2C7C:0125 · 接口 2 · 0x03/0x84"
       connection.ecm = .ready
       connection.issue = nil
       return
@@ -288,8 +387,13 @@ final class AppModel: ObservableObject {
         allowFactoryIdentityRewrite: allowFactoryIdentityRewrite
       )
       guard revision == operationRevision else { return }
-      pendingECMModeSwitchVerification = PendingECMModeSwitchVerification(
+      pendingFactoryRestoreTarget = nil
+      pendingModemConfigurationVerification = PendingModemConfigurationVerification(
         expectedUSBIdentity: result.expectedUSBIdentity,
+        previousUSBEnumerationIdentifier: nil,
+        expectedUSBNetworkMode: result.expectedUSBIdentity == nil ? nil : 1,
+        expectedEquipmentIdentity: nil,
+        purpose: .ecm,
         pendingIssue: nil
       )
       connection.device = .checking
@@ -309,8 +413,13 @@ final class AppModel: ObservableObject {
       if let modeSwitchError = error as? ECMModeSwitchError,
         modeSwitchError.shouldVerifyModeSwitch
       {
-        pendingECMModeSwitchVerification = PendingECMModeSwitchVerification(
+        pendingFactoryRestoreTarget = nil
+        pendingModemConfigurationVerification = PendingModemConfigurationVerification(
           expectedUSBIdentity: modeSwitchError.expectedUSBIdentity,
+          previousUSBEnumerationIdentifier: nil,
+          expectedUSBNetworkMode: modeSwitchError.expectedUSBIdentity == nil ? nil : 1,
+          expectedEquipmentIdentity: nil,
+          purpose: .ecm,
           pendingIssue: modeSwitchError.localizedDescription
         )
       }
@@ -328,31 +437,455 @@ final class AppModel: ObservableObject {
     }
   }
 
-  private func pendingModeSwitchIssue(
-    observedUSBIdentity: USBDeviceIdentifier?
-  ) -> String? {
-    guard let verification = pendingECMModeSwitchVerification else { return nil }
+  func restoreDJIFactoryUSBConfiguration(plan: DJIFactoryUSBRestorePlan) async {
+    guard !isSwitchingMode, !isSendingMessage else { return }
+    pendingModemConfigurationVerification = nil
+    operationRevision &+= 1
+    let revision = operationRevision
+    isSwitchingMode = true
+    modeSwitchDestination = .dji
+    defer {
+      isSwitchingMode = false
+      modeSwitchDestination = nil
+      schedulePendingForegroundRefreshIfPossible()
+      resumeQueuedMessagesIfNeeded()
+    }
+
+    if isDemoMode {
+      try? await Task.sleep(nanoseconds: 900_000_000)
+      guard revision == operationRevision else { return }
+      connection.usbDeviceIdentifier = .djiFirstGenerationFactory
+      connection.usbNetworkMode = 0
+      connection.transportDescription =
+        "USB AT · 2CA3:4006 · 接口 2 · 0x03/0x84"
+      connection.ecm = .unavailable
+      connection.networkInterface = nil
+      connection.networkAddress = nil
+      connection.issue = nil
+      return
+    }
+    guard let service else { return }
+
+    switch plan {
+    case .identityAndNetworkMode:
+      guard connection.usbDeviceIdentifier == .quectelEC25 else {
+        connection.issue =
+          "模块状态已在确认后发生变化，未执行 USB 身份改写。请刷新后重新确认。"
+        return
+      }
+    case .networkModeOnly:
+      guard connection.usbDeviceIdentifier == .djiFirstGenerationFactory else {
+        connection.issue =
+          "模块状态已在确认后发生变化，本次仅恢复 usbnet 的授权未执行 USB 身份改写。"
+        return
+      }
+    }
+
+    var restoreTarget =
+      plan.includesIdentityRewrite ? nil : pendingFactoryRestoreTarget
+    var factoryIdentityObserved =
+      connection.usbDeviceIdentifier == .djiFirstGenerationFactory
+    if plan.includesIdentityRewrite {
+      pendingFactoryRestoreTarget = nil
+      do {
+        let result = try await service.restoreFactoryUSBIdentity(
+          authorized: true
+        )
+        guard revision == operationRevision else { return }
+        restoreTarget = result.target
+        pendingFactoryRestoreTarget = result.target
+        pendingModemConfigurationVerification = PendingModemConfigurationVerification(
+          expectedUSBIdentity: result.expectedUSBIdentity,
+          previousUSBEnumerationIdentifier: result.target.enumerationIdentifier,
+          expectedUSBNetworkMode: nil,
+          expectedEquipmentIdentity: result.target.equipmentIdentity,
+          purpose: .factoryIdentity,
+          pendingIssue: nil
+        )
+        markModemConfigurationInProgress(
+          "正在恢复大疆 USB 标识；模块完成第一次重新枚举后会继续恢复私有模式"
+        )
+      } catch {
+        guard revision == operationRevision else { return }
+        guard let restoreError = error as? USBIdentityRestoreError else {
+          connection.issue = error.localizedDescription
+          return
+        }
+        restoreTarget = restoreError.target
+        if let restoreTarget {
+          pendingFactoryRestoreTarget = restoreTarget
+        }
+        if restoreError.shouldVerifyIdentityRestore {
+          pendingModemConfigurationVerification = PendingModemConfigurationVerification(
+            expectedUSBIdentity: restoreError.expectedUSBIdentity,
+            previousUSBEnumerationIdentifier:
+              restoreError.target?.enumerationIdentifier,
+            expectedUSBNetworkMode: nil,
+            expectedEquipmentIdentity: restoreError.target?.equipmentIdentity,
+            purpose: .factoryIdentity,
+            pendingIssue: restoreError.localizedDescription
+          )
+        }
+        connection.issue = error.localizedDescription
+        guard
+          restoreError.shouldWaitForReenumeration
+        else { return }
+        markModemConfigurationInProgress(
+          "正在确认大疆 USB 标识是否已生效；重连后会继续恢复私有模式"
+        )
+      }
+
+      guard let restoreTarget else { return }
+      let identityWaitResult = await waitForModemConfiguration(
+        expectedUSBIdentity: .djiFirstGenerationFactory,
+        previousUSBEnumerationIdentifier: restoreTarget.enumerationIdentifier,
+        expectedUSBNetworkMode: nil,
+        expectedEquipmentIdentity: restoreTarget.equipmentIdentity,
+        revision: revision,
+        progressIssue: "正在等待模块以 2CA3:4006 重新枚举"
+      )
+      guard revision == operationRevision else { return }
+      switch identityWaitResult {
+      case .matched:
+        factoryIdentityObserved = true
+      case .differentDevice, .cancelled:
+        return
+      case .timedOut:
+        let issue =
+          "大疆 USB 标识恢复指令已发送，但等待多轮后仍未确认模块完成重新枚举；"
+          + "请保持连接，模块出现后 DJIO 会自动继续第二阶段，无需再次点击。"
+        pendingModemConfigurationVerification = PendingModemConfigurationVerification(
+          expectedUSBIdentity: .djiFirstGenerationFactory,
+          previousUSBEnumerationIdentifier: restoreTarget.enumerationIdentifier,
+          expectedUSBNetworkMode: nil,
+          expectedEquipmentIdentity: restoreTarget.equipmentIdentity,
+          purpose: .factoryIdentity,
+          pendingIssue: issue
+        )
+        connection.issue = issue
+        return
+      }
+    }
+
+    guard factoryIdentityObserved else { return }
+
+    do {
+      let result = try await service.restoreFactoryUSBNetworkMode(
+        authorized: true,
+        expectedEquipmentIdentity: restoreTarget?.equipmentIdentity
+      )
+      guard revision == operationRevision else { return }
+      pendingFactoryRestoreTarget = result.target
+      pendingModemConfigurationVerification = PendingModemConfigurationVerification(
+        expectedUSBIdentity: result.expectedUSBIdentity,
+        previousUSBEnumerationIdentifier:
+          result.didChangeMode ? result.target.enumerationIdentifier : nil,
+        expectedUSBNetworkMode: result.expectedUSBNetworkMode,
+        expectedEquipmentIdentity: result.target.equipmentIdentity,
+        purpose: .factoryNetworkMode,
+        pendingIssue: nil
+      )
+      if result.didChangeMode {
+        markModemConfigurationInProgress(
+          "正在恢复 usbnet=0 大疆私有模式；模块会再次重新枚举"
+        )
+        let modeWaitResult = await waitForModemConfiguration(
+          expectedUSBIdentity: result.expectedUSBIdentity,
+          previousUSBEnumerationIdentifier: result.target.enumerationIdentifier,
+          expectedUSBNetworkMode: result.expectedUSBNetworkMode,
+          expectedEquipmentIdentity: result.target.equipmentIdentity,
+          revision: revision,
+          progressIssue: "正在等待模块以大疆私有模式重新枚举"
+        )
+        guard revision == operationRevision else { return }
+        switch modeWaitResult {
+        case .matched:
+          break
+        case .differentDevice, .cancelled:
+          return
+        case .timedOut:
+          let issue =
+            "usbnet=0 恢复指令已发送，但等待多轮后仍未确认第二次重新枚举完成；"
+            + "请保持连接并刷新，最终状态应为 2CA3:4006、usbnet=0。"
+          pendingModemConfigurationVerification = PendingModemConfigurationVerification(
+            expectedUSBIdentity: result.expectedUSBIdentity,
+            previousUSBEnumerationIdentifier: result.target.enumerationIdentifier,
+            expectedUSBNetworkMode: result.expectedUSBNetworkMode,
+            expectedEquipmentIdentity: result.target.equipmentIdentity,
+            purpose: .factoryNetworkMode,
+            pendingIssue: issue
+          )
+          connection.issue = issue
+          return
+        }
+      } else {
+        await refresh(allowDuringModeSwitch: true)
+      }
+      pendingFactoryRestoreTarget = nil
+    } catch {
+      guard revision == operationRevision else { return }
+      guard let modeRestoreError = error as? USBNetworkModeRestoreError else {
+        connection.issue = error.localizedDescription
+        return
+      }
+      if modeRestoreError.shouldVerifyNetworkModeRestore {
+        if let target = modeRestoreError.target {
+          pendingFactoryRestoreTarget = target
+        }
+        pendingModemConfigurationVerification = PendingModemConfigurationVerification(
+          expectedUSBIdentity: modeRestoreError.expectedUSBIdentity,
+          previousUSBEnumerationIdentifier:
+            modeRestoreError.target?.enumerationIdentifier,
+          expectedUSBNetworkMode: modeRestoreError.expectedUSBNetworkMode,
+          expectedEquipmentIdentity: modeRestoreError.target?.equipmentIdentity,
+          purpose: .factoryNetworkMode,
+          pendingIssue: modeRestoreError.localizedDescription
+        )
+      }
+      connection.issue = error.localizedDescription
+      guard
+        modeRestoreError.shouldWaitForReenumeration,
+        let modeRestoreTarget = modeRestoreError.target,
+        let expectedUSBNetworkMode = modeRestoreError.expectedUSBNetworkMode
+      else { return }
+      markModemConfigurationInProgress(
+        "正在确认 usbnet=0 是否已生效；模块重新枚举后会自动验证"
+      )
+      let modeWaitResult = await waitForModemConfiguration(
+        expectedUSBIdentity: .djiFirstGenerationFactory,
+        previousUSBEnumerationIdentifier: modeRestoreTarget.enumerationIdentifier,
+        expectedUSBNetworkMode: expectedUSBNetworkMode,
+        expectedEquipmentIdentity: modeRestoreTarget.equipmentIdentity,
+        revision: revision,
+        progressIssue: "正在等待模块以大疆私有模式重新枚举"
+      )
+      guard revision == operationRevision else { return }
+      switch modeWaitResult {
+      case .matched:
+        pendingFactoryRestoreTarget = nil
+        return
+      case .differentDevice, .cancelled:
+        return
+      case .timedOut:
+        break
+      }
+      let issue =
+        "恢复 usbnet=0 的结果仍无法确认；请保持连接并刷新，"
+        + "最终状态应为 2CA3:4006、usbnet=0。"
+      pendingModemConfigurationVerification = PendingModemConfigurationVerification(
+        expectedUSBIdentity: .djiFirstGenerationFactory,
+        previousUSBEnumerationIdentifier: modeRestoreTarget.enumerationIdentifier,
+        expectedUSBNetworkMode: expectedUSBNetworkMode,
+        expectedEquipmentIdentity: modeRestoreTarget.equipmentIdentity,
+        purpose: .factoryNetworkMode,
+        pendingIssue: issue
+      )
+      connection.issue = issue
+    }
+  }
+
+  private func waitForModemConfiguration(
+    expectedUSBIdentity: USBDeviceIdentifier,
+    previousUSBEnumerationIdentifier: USBEnumerationIdentifier,
+    expectedUSBNetworkMode: Int?,
+    expectedEquipmentIdentity: String,
+    revision: UInt64,
+    progressIssue: String
+  ) async -> ModemConfigurationWaitResult {
+    guard let service else { return .cancelled }
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: .seconds(30))
+    while clock.now < deadline {
+      let nextCheck = min(
+        clock.now.advanced(by: .milliseconds(2_500)),
+        deadline
+      )
+      try? await clock.sleep(until: nextCheck)
+      guard revision == operationRevision, !Task.isCancelled else { return .cancelled }
+      await refresh(allowDuringModeSwitch: true)
+      guard revision == operationRevision else { return .cancelled }
+      let identityMatches =
+        connection.usbDeviceIdentifier == expectedUSBIdentity
+      let enumerationChanged =
+        connection.usbEnumerationIdentifier != nil
+        && connection.usbEnumerationIdentifier != previousUSBEnumerationIdentifier
+      let modeMatches =
+        expectedUSBNetworkMode.map { connection.usbNetworkMode == $0 } ?? true
+      if identityMatches, modeMatches {
+        do {
+          let observedEquipmentIdentity =
+            try await service.currentUSBEquipmentIdentity(
+              expectedUSBIdentity: expectedUSBIdentity
+            )
+          guard revision == operationRevision, !Task.isCancelled else {
+            return .cancelled
+          }
+          if let observedEquipmentIdentity {
+            guard observedEquipmentIdentity == expectedEquipmentIdentity else {
+              connection.issue =
+                "重新连接后的模块与本次确认恢复的模块不是同一设备；"
+                + "已停止后续操作，且不会写入其他模块。"
+              return .differentDevice
+            }
+            return .matched
+          }
+        } catch {
+          guard revision == operationRevision, !Task.isCancelled else {
+            return .cancelled
+          }
+        }
+        markModemConfigurationInProgress(
+          "目标 USB 配置已出现，正在核对是否为同一只模块"
+        )
+        continue
+      }
+      markModemConfigurationInProgress(
+        enumerationChanged
+          ? "\(progressIssue)；已检测到新的 USB 枚举，正在确认目标配置"
+          : progressIssue
+      )
+    }
+    return .timedOut
+  }
+
+  private func markModemConfigurationInProgress(_ issue: String) {
+    connection.device = .checking
+    connection.control = .checking
+    connection.ecm = .checking
+    connection.issue = issue
+  }
+
+  private func pendingModemConfigurationIssue(
+    observedUSBIdentity: USBDeviceIdentifier?,
+    revision: UInt64
+  ) async -> String? {
+    guard let verification = pendingModemConfigurationVerification else { return nil }
+    let enumerationChanged =
+      verification.previousUSBEnumerationIdentifier.map {
+        connection.usbEnumerationIdentifier != nil
+          && connection.usbEnumerationIdentifier != $0
+      } ?? true
+    let requiresEnumerationChange =
+      verification.previousUSBEnumerationIdentifier != nil
+      && verification.expectedEquipmentIdentity == nil
+
+    if requiresEnumerationChange,
+      !enumerationChanged
+    {
+      return verification.pendingIssue ?? "模块尚未完成 USB 重新枚举"
+    }
 
     if let expectedUSBIdentity = verification.expectedUSBIdentity,
       observedUSBIdentity != expectedUSBIdentity
     {
+      if requiresEnumerationChange, !enumerationChanged {
+        return verification.pendingIssue ?? "模块尚未完成 USB 重新枚举"
+      }
       if let pendingIssue = verification.pendingIssue {
         return pendingIssue
       }
       if let observedUSBIdentity {
         return
-          "USB 身份转换未生效：预期 \(expectedUSBIdentity)，"
+          "USB 标识修改未生效：预期 \(expectedUSBIdentity)，"
           + "当前仍为 \(observedUSBIdentity)"
       }
-      return "模块已重新连接，但无法确认转换后的 USB 身份"
+      return "模块已重新连接，但无法确认修改后的 USB 标识"
     }
 
-    guard connection.ecm == .ready || connection.ecm == .warning else {
+    if let expectedUSBNetworkMode = verification.expectedUSBNetworkMode,
+      connection.usbNetworkMode != expectedUSBNetworkMode
+    {
+      if requiresEnumerationChange, !enumerationChanged {
+        return verification.pendingIssue ?? "模块尚未完成 USB 重新枚举"
+      }
+      if let pendingIssue = verification.pendingIssue {
+        return pendingIssue
+      }
+      if let observedMode = connection.usbNetworkMode {
+        return
+          "USB 网络模式修改未生效：预期 usbnet=\(expectedUSBNetworkMode)，"
+          + "当前为 usbnet=\(observedMode)"
+      }
+      return "模块已重新连接，但无法确认修改后的 USB 网络模式"
+    }
+
+    guard
+      verification.purpose != .ecm
+        || connection.ecm == .ready
+        || connection.ecm == .warning
+    else {
       return verification.pendingIssue ?? "模块已重新连接，但未检测到 ECM 网络接口"
     }
 
-    pendingECMModeSwitchVerification = nil
+    if let expectedEquipmentIdentity = verification.expectedEquipmentIdentity,
+      let expectedUSBIdentity = verification.expectedUSBIdentity
+    {
+      guard let service else {
+        return "目标 USB 配置已出现，但无法核对是否为同一只模块"
+      }
+      do {
+        let observedEquipmentIdentity =
+          try await service.currentUSBEquipmentIdentity(
+            expectedUSBIdentity: expectedUSBIdentity
+          )
+        guard revision == operationRevision else { return nil }
+        guard let observedEquipmentIdentity else {
+          return verification.pendingIssue
+            ?? "目标 USB 配置已出现，但尚未读取到模块 IMEI"
+        }
+        guard observedEquipmentIdentity == expectedEquipmentIdentity else {
+          return
+            "重新连接后的模块与本次确认恢复的模块不是同一设备；"
+            + "已保留恢复检查点，且不会写入其他模块。"
+        }
+      } catch {
+        guard revision == operationRevision else { return nil }
+        return verification.pendingIssue
+          ?? "目标 USB 配置已出现，但核对模块 IMEI 失败：\(error.localizedDescription)"
+      }
+    }
+
+    guard revision == operationRevision else { return nil }
+    switch verification.purpose {
+    case .ecm:
+      pendingModemConfigurationVerification = nil
+    case .factoryIdentity:
+      if connection.usbNetworkMode == 0 {
+        pendingModemConfigurationVerification = nil
+        pendingFactoryRestoreTarget = nil
+      } else if isSwitchingMode {
+        pendingModemConfigurationVerification = nil
+      } else {
+        schedulePendingFactoryNetworkModeRestore()
+        return "大疆 USB 标识已恢复，正在自动继续恢复私有模式；无需再次点击"
+      }
+    case .factoryNetworkMode:
+      pendingModemConfigurationVerification = nil
+      pendingFactoryRestoreTarget = nil
+    }
     return nil
+  }
+
+  private func schedulePendingFactoryNetworkModeRestore() {
+    guard
+      factoryRestoreContinuationTask == nil,
+      pendingFactoryRestoreTarget != nil
+    else { return }
+
+    factoryRestoreContinuationTask = Task { @MainActor [weak self] in
+      await Task.yield()
+      guard let self else { return }
+      defer { self.factoryRestoreContinuationTask = nil }
+      guard
+        !Task.isCancelled,
+        !self.isSwitchingMode,
+        !self.isSendingMessage,
+        self.connection.usbDeviceIdentifier == .djiFirstGenerationFactory,
+        self.connection.usbNetworkMode != 0,
+        self.pendingFactoryRestoreTarget != nil
+      else { return }
+      await self.restoreDJIFactoryUSBConfiguration(plan: .networkModeOnly)
+    }
   }
 
   func selectMessage(_ id: String?) {
@@ -400,13 +933,53 @@ final class AppModel: ObservableObject {
     selection = .messages
   }
 
+  func openMessageComposer(for recipient: String) {
+    let trimmed = recipient.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return }
+    messageCompositionRequest = MessageCompositionRequest(id: UUID(), recipient: trimmed)
+    selection = .messages
+  }
+
   func openIncomingCallsFromNotification() {
     selection = .calls
+  }
+
+  func dismissIncomingCallPresentation() {
+    presentedIncomingCall = nil
+  }
+
+  func hangUpIncomingCall() async -> Bool {
+    if isDemoMode {
+      presentedIncomingCall = nil
+      return true
+    }
+    guard let service else {
+      connection.issue = "无法挂断：未连接到蜂窝模块。"
+      return false
+    }
+    do {
+      try await service.hangUpIncomingCall()
+      presentedIncomingCall = nil
+      return true
+    } catch {
+      connection.issue = "挂断失败：\(error.localizedDescription)"
+      return false
+    }
+  }
+
+  func openIncomingCallPresentation() {
+    presentedIncomingCall = nil
+    openIncomingCallsFromNotification()
   }
 
   func consumeMessageNavigationRequest(_ id: String) {
     guard messageNavigationRequestID == id else { return }
     messageNavigationRequestID = nil
+  }
+
+  func consumeMessageCompositionRequest(_ id: UUID) {
+    guard messageCompositionRequest?.id == id else { return }
+    messageCompositionRequest = nil
   }
 
   func deleteSelectedMessage() async {
@@ -556,15 +1129,16 @@ final class AppModel: ObservableObject {
 
   func updateNotifications(_ enabled: Bool) async {
     if enabled {
+      notificationsEnabled = true
       do {
         let granted = try await UNUserNotificationCenter.current().requestAuthorization(options: [
           .alert, .sound,
         ])
-        notificationsEnabled = granted
-        if !granted { connection.issue = "系统通知权限未开启" }
+        if !granted {
+          connection.issue = "请在“系统设置 > 通知 > DJIO”中允许通知。"
+        }
       } catch {
-        notificationsEnabled = false
-        connection.issue = error.localizedDescription
+        connection.issue = "请在“系统设置 > 通知 > DJIO”中允许通知。"
       }
     } else {
       notificationsEnabled = false
@@ -608,9 +1182,18 @@ final class AppModel: ObservableObject {
           }
         case .incomingCall(let call):
           await self.loadIncomingCalls()
-          await self.postNotification(for: call)
-        case .incomingCallUpdated:
+          if self.notificationsEnabled {
+            self.presentedIncomingCall = call
+          }
+        case .incomingCallUpdated(let call):
           await self.loadIncomingCalls()
+          if self.presentedIncomingCall?.id == call.id {
+            self.presentedIncomingCall = call
+          }
+        case .incomingCallEnded(let callID):
+          if self.presentedIncomingCall?.id == callID {
+            self.presentedIncomingCall = nil
+          }
         case .warning(let warning):
           self.connection.issue = warning
         }
@@ -835,21 +1418,11 @@ final class AppModel: ObservableObject {
     content.title = message.sender
     content.body = message.body
     content.sound = .default
+    content.categoryIdentifier = DJIONotificationCategory.message
+    content.threadIdentifier = "sms:\(message.sender)"
     content.userInfo = ["kind": "message", "messageID": message.id]
     try? await UNUserNotificationCenter.current().add(
-      UNNotificationRequest(identifier: message.id, content: content, trigger: nil)
-    )
-  }
-
-  private func postNotification(for call: IncomingCallRecord) async {
-    guard notificationsEnabled else { return }
-    let content = UNMutableNotificationContent()
-    content.title = "来电"
-    content.body = call.callerNumber ?? "未知号码"
-    content.sound = .default
-    content.userInfo = ["kind": "incomingCall", "callID": call.id]
-    try? await UNUserNotificationCenter.current().add(
-      UNNotificationRequest(identifier: "call:\(call.id)", content: content, trigger: nil)
+      UNNotificationRequest(identifier: "sms:\(message.id)", content: content, trigger: nil)
     )
   }
 
@@ -949,6 +1522,7 @@ final class AppModel: ObservableObject {
       ecm: .ready,
       cellular: .ready,
       usbDeviceIdentifier: .quectelEC25,
+      usbNetworkMode: 1,
       transportDescription: "USB AT · 2C7C:0125 · 接口 2 · 0x03/0x84",
       networkInterface: "en6",
       networkAddress: "192.168.225.22",

@@ -90,18 +90,24 @@ struct ConnectionView: View {
     .padding(18)
     .navigationTitle("连接")
     .toolbar {
-      RefreshToolbarActions(
-        isRefreshing: model.isRefreshing,
-        refreshHelp: "刷新连接状态",
-        refresh: { Task { await model.refresh() } },
-        secondarySystemImage: "arrow.triangle.2.circlepath",
-        secondaryHelp: rewritesUSBIdentity ? "转换 USB 身份并配置 ECM" : "切换到 ECM",
-        isSecondaryDisabled: model.isSwitchingMode || model.isRefreshing || model.isSendingMessage
-          || model.connection.control == .unavailable,
-        secondaryAction: {
-          model.presentModeSwitchConfirmation()
+      ToolbarItem {
+        Button {
+          Task { await model.refresh() }
+        } label: {
+          Group {
+            if model.isRefreshing {
+              ProgressView()
+                .controlSize(.small)
+            } else {
+              Image(systemName: "arrow.clockwise")
+            }
+          }
+          .frame(width: 16, height: 16)
         }
-      )
+        .disabled(model.isRefreshing)
+        .help("刷新连接状态")
+        .accessibilityLabel("刷新连接状态")
+      }
     }
     .confirmationDialog(
       confirmedFactoryIdentityRewrite ? "转换大疆模块并启用 ECM？" : "切换到 ECM 模式？",
@@ -131,25 +137,104 @@ struct ConnectionView: View {
     }
   }
 
-  private var rewritesUSBIdentity: Bool {
-    model.connection.usbDeviceIdentifier == .djiFirstGenerationFactory
-  }
-
   private var confirmedFactoryIdentityRewrite: Bool {
     model.modeConfirmationAllowsFactoryIdentityRewrite
+  }
+
+  private var modemConfigurationActionIsDisabled: Bool {
+    model.isSwitchingMode || model.isRefreshing || model.isSendingMessage
+      || model.connection.control == .unavailable
   }
 
   private var details: CellularDetails {
     model.connection.cellularDetails
   }
 
+  private var displayedModuleUsageMode: ModuleUsageMode? {
+    model.modeSwitchDestination ?? model.connection.moduleUsageMode
+  }
+
+  private var moduleUsageModeSelection: Binding<ModuleUsageMode?> {
+    Binding(
+      get: { displayedModuleUsageMode },
+      set: { requestedMode in
+        guard
+          let requestedMode,
+          requestedMode != displayedModuleUsageMode,
+          !modemConfigurationActionIsDisabled
+        else { return }
+
+        switch requestedMode {
+        case .ecm:
+          guard canConfigureECMMode else { return }
+          model.presentModeSwitchConfirmation()
+        case .dji:
+          guard canConfigureDJIMode else { return }
+          Task {
+            await model.restoreDJIFactoryUSBConfigurationFromCurrentState()
+          }
+        }
+      }
+    )
+  }
+
+  private var moduleModeRow: some View {
+    Picker(selection: moduleUsageModeSelection) {
+                            Label("大疆模式", systemImage: "drone")
+        .tag(ModuleUsageMode.dji as ModuleUsageMode?)
+                            Label("网卡模式", systemImage: "macbook.and.ipad")
+        .tag(ModuleUsageMode.ecm as ModuleUsageMode?)
+    } label: {
+      Label {
+        HStack(spacing: 8) {
+          Text("使用模式")
+          ProgressView()
+            .controlSize(.small)
+            .opacity(model.isSwitchingMode ? 1 : 0)
+            .frame(width: 16)
+            .accessibilityHidden(!model.isSwitchingMode)
+        }
+      } icon: {
+        Image(systemName: "switch.2")
+      }
+      .alignmentGuide(.firstTextBaseline) { dimensions in
+        dimensions[VerticalAlignment.center]
+      }
+      .offset(y: 5)
+    }
+    .pickerStyle(.segmented)
+    .controlSize(.large)
+    .disabled(
+      modemConfigurationActionIsDisabled
+        || (!canConfigureECMMode && !canConfigureDJIMode)
+    )
+    .accessibilityLabel("模块使用模式")
+  }
+
+  private var canConfigureECMMode: Bool {
+    model.connection.usbDeviceIdentifier == .quectelEC25
+      || model.connection.usbDeviceIdentifier == .djiFirstGenerationFactory
+  }
+
+  private var canConfigureDJIMode: Bool {
+    model.connection.usbDeviceIdentifier == .quectelEC25
+      || (model.connection.usbDeviceIdentifier == .djiFirstGenerationFactory
+        && model.connection.usbNetworkMode != 0)
+  }
+
   private var connectionSection: some View {
     Section {
       ConnectionStatusRow(
-        title: "4G 模块",
+        title: "蜂窝模块",
         systemImage: "externaldrive.connected.to.line.below",
         value: model.connection.device.label,
         condition: model.connection.device
+      )
+      moduleModeRow
+      ValueRow(
+        title: "USB 标识",
+        value: model.connection.usbDeviceIdentifier?.description ?? "未获取",
+        systemImage: "number"
       )
       ConnectionStatusRow(
         title: "AT 控制",
@@ -177,7 +262,7 @@ struct ConnectionView: View {
           .font(.caption.monospaced())
           .textSelection(.enabled)
         if let updated = model.connection.lastUpdated {
-          Text("上次更新：\(updated.formatted(date: .abbreviated, time: .shortened))")
+          Text("上次更新：\(updated.formatted(date: .abbreviated, time: .standard))")
         }
       }
     }
@@ -213,13 +298,20 @@ private struct ConnectionStatusRow: View {
 private struct ValueRow: View {
   let title: String
   let value: String
+  var systemImage: String? = nil
 
   var body: some View {
-    LabeledContent(title) {
+    LabeledContent {
       Text(value)
         .font(.body.monospaced())
         .foregroundStyle(.secondary)
         .textSelection(.enabled)
+    } label: {
+      if let systemImage {
+        Label(title, systemImage: systemImage)
+      } else {
+        Text(title)
+      }
     }
   }
 }

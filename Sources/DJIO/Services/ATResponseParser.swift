@@ -61,6 +61,73 @@ struct ATResponseParser {
     return Int(field.trimmingCharacters(in: .whitespacesAndNewlines))
   }
 
+  func usbDeviceConfiguration(from response: String) -> USBDeviceConfiguration? {
+    guard
+      let line = normalizedLines(response).first(where: {
+        $0.uppercased().hasPrefix("+QCFG:")
+      }),
+      let fields = atFields(in: line, prefix: "+QCFG:"),
+      fields.count == 10,
+      fields[0].caseInsensitiveCompare("usbcfg") == .orderedSame
+    else {
+      return nil
+    }
+    let values = fields.dropFirst().compactMap(configurationInteger)
+    guard values.count == 9,
+      let vendorID = UInt16(exactly: values[0]),
+      let productID = UInt16(exactly: values[1])
+    else {
+      return nil
+    }
+    return USBDeviceConfiguration(
+      deviceIdentifier: USBDeviceIdentifier(
+        vendorID: vendorID,
+        productID: productID
+      ),
+      diag: values[2],
+      nmea: values[3],
+      atPort: values[4],
+      modem: values[5],
+      rmnet: values[6],
+      adb: values[7],
+      uac: values[8]
+    )
+  }
+
+  func usbNetworkMode(from response: String) -> Int? {
+    guard
+      let line = normalizedLines(response).first(where: {
+        $0.uppercased().hasPrefix("+QCFG:")
+      }),
+      let fields = atFields(in: line, prefix: "+QCFG:"),
+      fields.count == 2,
+      fields[0].caseInsensitiveCompare("usbnet") == .orderedSame,
+      let mode = configurationInteger(fields[1]),
+      mode >= 0
+    else {
+      return nil
+    }
+    return mode
+  }
+
+  func equipmentIdentity(from response: String) -> String? {
+    for line in normalizedLines(response) {
+      let candidate: String
+      if line.uppercased().hasPrefix("+CGSN:") {
+        candidate = String(line.dropFirst("+CGSN:".count))
+          .trimmingCharacters(in: CharacterSet(charactersIn: " \t\""))
+      } else {
+        candidate = line
+      }
+      if candidate.count == 15,
+        candidate.allSatisfy({ $0.isASCII && $0.isNumber })
+      {
+        return candidate
+      }
+    }
+    return nil
+  }
+
   func incomingVoiceCalls(from response: String) -> [ATIncomingVoiceCall] {
     normalizedLines(response).compactMap { line in
       guard let fields = atFields(in: line, prefix: "+CLCC:"), fields.count >= 5,
@@ -180,7 +247,19 @@ struct ATResponseParser {
     guard let fields = atFields(in: line, prefix: "+COPS:"), fields.count >= 3 else {
       return nil
     }
-    return nonempty(fields[2])
+    guard let name = nonempty(fields[2]) else { return nil }
+    switch name.uppercased() {
+    case "CHN-CT":
+      return "中国电信"
+    case "CHN-CU", "CHN-UNICOM":
+      return "中国联通"
+    case "CHN-CM", "CHN-MOBILE":
+      return "中国移动"
+    case "CHN-CBN", "CHN-BROADNET":
+      return "中国广电"
+    default:
+      return name
+    }
   }
 
   func operatorAccessTechnology(from response: String) -> String? {
@@ -359,6 +438,14 @@ struct ATResponseParser {
   private func nonnegativeInteger(_ value: String) -> Int? {
     guard let parsed = Int(value), parsed >= 0 else { return nil }
     return parsed
+  }
+
+  private func configurationInteger(_ value: String) -> Int? {
+    let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    if normalized.lowercased().hasPrefix("0x") {
+      return Int(normalized.dropFirst(2), radix: 16)
+    }
+    return Int(normalized)
   }
 
   private func metricInteger(_ value: String) -> Int? {

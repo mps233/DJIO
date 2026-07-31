@@ -6,6 +6,7 @@ struct SMSAddressDisplayFormatterTests {
   @Test func groupsMainlandMobileNumbers() {
     #expect(SMSAddressDisplayFormatter.string(for: "+8615612345678") == "+86 156 1234 5678")
     #expect(SMSAddressDisplayFormatter.string(for: "+8613912345678") == "+86 139 1234 5678")
+    #expect(SMSAddressDisplayFormatter.string(for: "15342284706") == "153 4228 4706")
   }
 
   @Test func preservesShortCodesAndUnsupportedAddresses() {

@@ -2,13 +2,55 @@ import AppKit
 import SwiftUI
 import UserNotifications
 
+enum DJIONotificationCategory {
+  static let message = "DJIO.message"
+  static let incomingCall = "DJIO.incomingCall"
+}
+
+enum DJIONotificationAction {
+  static let viewMessage = "DJIO.viewMessage"
+  static let viewIncomingCall = "DJIO.viewIncomingCall"
+  static let dismissIncomingCall = "DJIO.dismissIncomingCall"
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
   @MainActor private var notificationNavigationHandler: ((NotificationNavigationTarget) -> Void)?
   @MainActor private var pendingNotificationTarget: NotificationNavigationTarget?
   @MainActor private var terminationHandler: (() -> Void)?
+  @MainActor private let incomingCallPanelController = IncomingCallPanelController()
 
   func applicationDidFinishLaunching(_ notification: Notification) {
-    UNUserNotificationCenter.current().delegate = self
+    let center = UNUserNotificationCenter.current()
+    center.delegate = self
+    center.setNotificationCategories([
+      UNNotificationCategory(
+        identifier: DJIONotificationCategory.message,
+        actions: [
+          UNNotificationAction(
+            identifier: DJIONotificationAction.viewMessage,
+            title: "查看短信",
+            options: [.foreground]
+          )
+        ],
+        intentIdentifiers: []
+      ),
+      UNNotificationCategory(
+        identifier: DJIONotificationCategory.incomingCall,
+        actions: [
+          UNNotificationAction(
+            identifier: DJIONotificationAction.viewIncomingCall,
+            title: "查看来电",
+            options: [.foreground]
+          ),
+          UNNotificationAction(
+            identifier: DJIONotificationAction.dismissIncomingCall,
+            title: "忽略",
+            options: []
+          ),
+        ],
+        intentIdentifiers: []
+      ),
+    ])
   }
 
   @MainActor
@@ -26,7 +68,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
   @MainActor
   func applicationWillTerminate(_ notification: Notification) {
+    incomingCallPanelController.dismiss(animated: false)
     terminationHandler?()
+  }
+
+  @MainActor
+  func updateIncomingCallPanel(
+    call: IncomingCallRecord?,
+    viewAction: @escaping () -> Void,
+    messageAction: @escaping () -> Void,
+    hangUpAction: @escaping @MainActor () async -> Bool
+  ) {
+    if let call {
+      incomingCallPanelController.present(
+        call: call,
+        viewAction: viewAction,
+        messageAction: messageAction,
+        hangUpAction: hangUpAction
+      )
+    } else {
+      incomingCallPanelController.dismiss()
+    }
   }
 
   func userNotificationCenter(
@@ -42,6 +104,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     didReceive response: UNNotificationResponse,
     withCompletionHandler completionHandler: @escaping () -> Void
   ) {
+    if response.actionIdentifier == DJIONotificationAction.dismissIncomingCall
+      || response.actionIdentifier == UNNotificationDismissActionIdentifier
+    {
+      completionHandler()
+      return
+    }
+
     let content = response.notification.request.content
     let target = NotificationNavigationTarget.resolve(
       userInfo: content.userInfo,
@@ -79,6 +148,9 @@ struct DJIOApp: App {
         .background {
           NotificationNavigationBridge(model: model, appDelegate: appDelegate)
         }
+        .background {
+          IncomingCallPresentationBridge(model: model, appDelegate: appDelegate)
+        }
         .frame(minWidth: 860, minHeight: 520)
         .task { model.start() }
     }
@@ -114,6 +186,43 @@ struct DJIOApp: App {
       )
     }
     .menuBarExtraStyle(.window)
+  }
+}
+
+private struct IncomingCallPresentationBridge: View {
+  let model: AppModel
+  let appDelegate: AppDelegate
+  @Environment(\.openWindow) private var openWindow
+
+  var body: some View {
+    Color.clear
+      .frame(width: 0, height: 0)
+      .onAppear {
+        updatePanel(for: model.presentedIncomingCall)
+      }
+      .onReceive(model.$presentedIncomingCall) { call in
+        updatePanel(for: call)
+      }
+  }
+
+  private func updatePanel(for call: IncomingCallRecord?) {
+    appDelegate.updateIncomingCallPanel(
+      call: call,
+      viewAction: {
+        openWindow(id: "main")
+        NSApp.activate(ignoringOtherApps: true)
+        model.openIncomingCallPresentation()
+      },
+      messageAction: {
+        guard let number = call?.callerNumber else { return }
+        openWindow(id: "main")
+        NSApp.activate(ignoringOtherApps: true)
+        model.openMessageComposer(for: number)
+      },
+      hangUpAction: {
+        await model.hangUpIncomingCall()
+      }
+    )
   }
 }
 

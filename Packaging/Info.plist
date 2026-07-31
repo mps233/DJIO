@@ -9,7 +9,7 @@
     <key>CFBundleExecutable</key>
     <string>DJIO</string>
     <key>CFBundleIdentifier</key>
-    <string>com.local.CellularBridge</string>
+    <string>com.local.DJIO</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>

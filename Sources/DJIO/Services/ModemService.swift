@@ -110,6 +110,34 @@ actor ModemService {
     try await callHistory.allCalls()
   }
 
+  func hangUpIncomingCall() async throws {
+    guard let callID = activeIncomingCall?.record.id else { return }
+    await acquireTransportOperation()
+    defer { releaseTransportOperation() }
+    guard activeIncomingCall?.record.id == callID else { return }
+
+    do {
+      let descriptor = try await ensureConnected()
+      try await initializeIfNeeded(descriptor: descriptor)
+      do {
+        _ = try await transport.perform([
+          ATCommand("AT+CHUP", timeout: 5)
+        ])
+      } catch let error as ModemTransportError {
+        guard case .modemRejected = error else { throw error }
+        _ = try await transport.perform([
+          ATCommand("ATH", timeout: 5)
+        ])
+      }
+      if activeIncomingCall?.record.id == callID {
+        await finishActiveIncomingCall()
+      }
+    } catch {
+      resetInitializationAfterTransportFailure(error)
+      throw error
+    }
+  }
+
   func outboxMessages() async throws -> [OutgoingSMS] {
     try await outbox.messages()
   }
@@ -204,6 +232,61 @@ actor ModemService {
     }
   }
 
+  func restoreFactoryUSBIdentity(
+    authorized: Bool
+  ) async throws -> USBIdentityRestoreResult {
+    await acquireTransportOperation()
+    defer { releaseTransportOperation() }
+    try Task.checkCancellation()
+    do {
+      return try await restoreFactoryUSBIdentityExclusively(authorized: authorized)
+    } catch {
+      resetInitializationAfterTransportFailure(error)
+      throw error
+    }
+  }
+
+  func restoreFactoryUSBNetworkMode(
+    authorized: Bool,
+    expectedEquipmentIdentity: String? = nil
+  ) async throws -> USBNetworkModeRestoreResult {
+    await acquireTransportOperation()
+    defer { releaseTransportOperation() }
+    try Task.checkCancellation()
+    do {
+      return try await restoreFactoryUSBNetworkModeExclusively(
+        authorized: authorized,
+        expectedEquipmentIdentity: expectedEquipmentIdentity
+      )
+    } catch {
+      resetInitializationAfterTransportFailure(error)
+      throw error
+    }
+  }
+
+  func currentUSBEquipmentIdentity(
+    expectedUSBIdentity: USBDeviceIdentifier
+  ) async throws -> String? {
+    await acquireTransportOperation()
+    defer { releaseTransportOperation() }
+    try Task.checkCancellation()
+    do {
+      let descriptor = try await ensureConnected()
+      guard descriptor.usbDeviceIdentifier == expectedUSBIdentity else {
+        return nil
+      }
+      let responses = try await transport.perform([
+        ATCommand("AT+CGSN", timeout: 3)
+      ])
+      return responses.first.flatMap {
+        parser.equipmentIdentity(from: $0.raw)
+      }
+    } catch {
+      resetInitializationAfterTransportFailure(error)
+      throw error
+    }
+  }
+
   func disconnect() async {
     await acquireTransportOperation()
     defer { releaseTransportOperation() }
@@ -217,7 +300,7 @@ actor ModemService {
     lastInboxReconciliationAt = nil
     cachedIncomingParts.removeAll()
     announcedIncomingAt.removeAll()
-    activeIncomingCall = nil
+    clearActiveIncomingCall()
     resetCachedFirmware()
   }
 
@@ -243,6 +326,18 @@ actor ModemService {
 
     var warnings: [String] = []
     var reconciledStorages: Set<String> = []
+    let usbNetworkMode: Int?
+    if descriptor.usbDeviceIdentifier != nil,
+      let response = try await optionalStatusResponse(
+        ATCommand("AT+QCFG=\"usbnet\"", timeout: 2)
+      )
+    {
+      usbNetworkMode = parser.usbNetworkMode(from: response)
+    } else {
+      usbNetworkMode = nil
+    }
+    try Task.checkCancellation()
+
     let signalRaw: String
     if let response = try await optionalStatusResponse(ATCommand("AT+CSQ", timeout: 2)) {
       signalRaw = response
@@ -322,6 +417,7 @@ actor ModemService {
 
     return ModemPollResult(
       transport: descriptor,
+      usbNetworkMode: usbNetworkMode,
       signalRSSI: parser.signalRSSI(from: signalRaw),
       registration: parser.registration(from: registrationRaw),
       operatorName: parser.operatorName(from: operatorRaw),
@@ -349,7 +445,7 @@ actor ModemService {
 
   private func unsolicitedConsumerDidFinish() {
     unsolicitedTask = nil
-    activeIncomingCall = nil
+    clearActiveIncomingCall()
   }
 
   private func removeMessageEventContinuation(_ id: UUID) {
@@ -538,7 +634,18 @@ actor ModemService {
   }
 
   private func finishActiveIncomingCall() async {
+    let callID = activeIncomingCall?.record.id
     await publishActiveIncomingCallIfNeeded()
+    if let callID {
+      emitMessageEvent(.incomingCallEnded(callID))
+    }
+    activeIncomingCall = nil
+  }
+
+  private func clearActiveIncomingCall() {
+    if let callID = activeIncomingCall?.record.id {
+      emitMessageEvent(.incomingCallEnded(callID))
+    }
     activeIncomingCall = nil
   }
 
@@ -806,6 +913,185 @@ actor ModemService {
     }
   }
 
+  private func restoreFactoryUSBIdentityExclusively(
+    authorized: Bool
+  ) async throws -> USBIdentityRestoreResult {
+    let descriptor = try await ensureConnected()
+    guard authorized else {
+      throw USBIdentityRestoreError.notAuthorized
+    }
+    guard descriptor.usbDeviceIdentifier == .quectelEC25 else {
+      throw USBIdentityRestoreError.unsupportedCurrentIdentity(
+        descriptor.usbDeviceIdentifier
+      )
+    }
+    try await initializeIfNeeded(descriptor: descriptor)
+    let target = try await usbRestoreTarget(descriptor: descriptor) {
+      USBIdentityRestoreError.equipmentIdentityUnavailable
+    }
+
+    do {
+      do {
+        _ = try await transport.perform([
+          ATCommand(
+            "AT+QCFG=\"usbcfg\",0x2CA3,0x4006,1,1,1,1,1,0,0",
+            timeout: 8
+          )
+        ])
+      } catch {
+        if Self.hasUnknownCommandOutcome(error) {
+          throw USBIdentityRestoreError.identityRewriteOutcomeUnknown(
+            detail: error.localizedDescription,
+            target: target
+          )
+        }
+        throw error
+      }
+
+      let observedConfiguration: USBDeviceConfiguration?
+      do {
+        let responses = try await transport.perform([
+          ATCommand("AT+QCFG=\"usbcfg\"", timeout: 5)
+        ])
+        observedConfiguration = responses.first.flatMap {
+          parser.usbDeviceConfiguration(from: $0.raw)
+        }
+      } catch {
+        throw USBIdentityRestoreError.identityVerificationFailed(
+          observed: nil,
+          target: target
+        )
+      }
+      guard observedConfiguration == .djiFirstGenerationFactory else {
+        throw USBIdentityRestoreError.identityVerificationFailed(
+          observed: observedConfiguration,
+          target: target
+        )
+      }
+
+      do {
+        _ = try await transport.perform([
+          ATCommand("AT+CFUN=1,1", timeout: 8)
+        ])
+      } catch {
+        if !Self.isUSBDisconnect(error) {
+          if Self.hasUnknownCommandOutcome(error) {
+            throw USBIdentityRestoreError.restartOutcomeUnknown(
+              detail: error.localizedDescription,
+              target: target
+            )
+          }
+          throw USBIdentityRestoreError.identityRewriteAcceptedButRestartFailed(
+            detail: error.localizedDescription,
+            target: target
+          )
+        }
+      }
+
+      await disconnectExclusively()
+      return USBIdentityRestoreResult(
+        expectedUSBIdentity: .djiFirstGenerationFactory,
+        target: target
+      )
+    } catch {
+      await disconnectExclusively()
+      throw error
+    }
+  }
+
+  private func restoreFactoryUSBNetworkModeExclusively(
+    authorized: Bool,
+    expectedEquipmentIdentity: String?
+  ) async throws -> USBNetworkModeRestoreResult {
+    let descriptor = try await ensureConnected()
+    guard authorized else {
+      throw USBNetworkModeRestoreError.notAuthorized
+    }
+    guard descriptor.usbDeviceIdentifier == .djiFirstGenerationFactory else {
+      throw USBNetworkModeRestoreError.unsupportedCurrentIdentity(
+        descriptor.usbDeviceIdentifier
+      )
+    }
+    try await initializeIfNeeded(descriptor: descriptor)
+    let target = try await usbRestoreTarget(descriptor: descriptor) {
+      USBNetworkModeRestoreError.equipmentIdentityUnavailable
+    }
+    if let expectedEquipmentIdentity,
+      target.equipmentIdentity != expectedEquipmentIdentity
+    {
+      throw USBNetworkModeRestoreError.differentDevice
+    }
+
+    let currentModeResponse = try await transport.perform([
+      ATCommand("AT+QCFG=\"usbnet\"", timeout: 5)
+    ])
+    guard
+      let currentModeRaw = currentModeResponse.first?.raw,
+      let currentMode = parser.usbNetworkMode(from: currentModeRaw)
+    else {
+      throw USBNetworkModeRestoreError.currentModeCouldNotBeRead
+    }
+    guard currentMode != 0 else {
+      return USBNetworkModeRestoreResult(
+        expectedUSBIdentity: .djiFirstGenerationFactory,
+        expectedUSBNetworkMode: 0,
+        didChangeMode: false,
+        target: target
+      )
+    }
+
+    do {
+      do {
+        _ = try await transport.perform([
+          ATCommand("AT+QCFG=\"usbnet\",0", timeout: 8)
+        ])
+      } catch {
+        if !Self.isUSBDisconnect(error) {
+          if Self.hasUnknownCommandOutcome(error) {
+            throw USBNetworkModeRestoreError.outcomeUnknown(
+              detail: error.localizedDescription,
+              target: target
+            )
+          }
+          throw error
+        }
+      }
+
+      await disconnectExclusively()
+      return USBNetworkModeRestoreResult(
+        expectedUSBIdentity: .djiFirstGenerationFactory,
+        expectedUSBNetworkMode: 0,
+        didChangeMode: true,
+        target: target
+      )
+    } catch {
+      await disconnectExclusively()
+      throw error
+    }
+  }
+
+  private func usbRestoreTarget<E: Error>(
+    descriptor: ATTransportDescriptor,
+    unavailableError: () -> E
+  ) async throws -> USBRestoreTarget {
+    guard let enumerationIdentifier = descriptor.usbEnumerationIdentifier else {
+      throw unavailableError()
+    }
+    let responses = try await transport.perform([
+      ATCommand("AT+CGSN", timeout: 3)
+    ])
+    guard
+      let response = responses.first,
+      let equipmentIdentity = parser.equipmentIdentity(from: response.raw)
+    else {
+      throw unavailableError()
+    }
+    return USBRestoreTarget(
+      equipmentIdentity: equipmentIdentity,
+      enumerationIdentifier: enumerationIdentifier
+    )
+  }
+
   private func optionalStatusResponse(_ command: ATCommand) async throws -> String? {
     do {
       return try await transport.perform([command]).first?.raw
@@ -951,7 +1237,7 @@ actor ModemService {
       lastInboxReconciliationAt = nil
       cachedIncomingParts.removeAll()
       announcedIncomingAt.removeAll()
-      activeIncomingCall = nil
+      clearActiveIncomingCall()
       resetCachedFirmware()
     case .modemRejected, .invalidCommand:
       break

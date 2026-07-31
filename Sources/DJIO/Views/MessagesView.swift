@@ -7,6 +7,8 @@ struct MessagesView: View {
   @State private var query = ""
   @State private var drafts: [String: String] = [:]
   @State private var showingComposer = false
+  @State private var composerRecipient = ""
+  @State private var composerRequestID = UUID()
   @State private var columnVisibility: NavigationSplitViewVisibility = .all
   @State private var preferredCompactColumn: NavigationSplitViewColumn = .content
   @State private var incomingDeleteCandidate: SMSMessage?
@@ -59,12 +61,16 @@ struct MessagesView: View {
     .onChange(of: model.messageNavigationRequestID) { _, requestID in
       openRequestedMessage(requestID)
     }
+    .onChange(of: model.messageCompositionRequest) { _, request in
+      openRequestedComposer(request)
+    }
     .sheet(isPresented: $showingComposer) {
-      ComposeMessageSheet { recipient in
+      ComposeMessageSheet(initialRecipient: composerRecipient) { recipient in
         query = ""
         selectedConversationID = SMSConversationBuilder.canonicalAddress(recipient)
         preferredCompactColumn = .detail
       }
+      .id(composerRequestID)
       .environmentObject(model)
     }
     .confirmationDialog(
@@ -163,8 +169,7 @@ struct MessagesView: View {
         secondaryHelp: "写新短信",
         isSecondaryDisabled: false,
         secondaryAction: {
-          model.clearOutgoingMessageIssue()
-          showingComposer = true
+          presentComposer()
         }
       )
     }
@@ -195,8 +200,7 @@ struct MessagesView: View {
           Text("收到或发出的短信会按号码显示在这里。")
         } actions: {
           Button("新短信") {
-            model.clearOutgoingMessageIssue()
-            showingComposer = true
+            presentComposer()
           }
         }
       } else if filteredConversations.isEmpty {
@@ -224,6 +228,7 @@ struct MessagesView: View {
       }
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
+    .navigationTitle("短信")
   }
 
   private var conversationRowInsets: EdgeInsets {
@@ -301,9 +306,30 @@ struct MessagesView: View {
   private func synchronizeSelectionUnlessNavigationIsPending() {
     let requestID = model.messageNavigationRequestID
     openRequestedMessage(requestID)
+    openRequestedComposer(model.messageCompositionRequest)
     if requestID == nil {
       synchronizeSelection()
     }
+  }
+
+  private func openRequestedComposer(_ request: MessageCompositionRequest?) {
+    guard let request else { return }
+    query = ""
+    let conversationID = SMSConversationBuilder.canonicalAddress(request.recipient)
+    if conversations.contains(where: { $0.id == conversationID }) {
+      selectedConversationID = conversationID
+      preferredCompactColumn = .detail
+    } else {
+      presentComposer(recipient: request.recipient)
+    }
+    model.consumeMessageCompositionRequest(request.id)
+  }
+
+  private func presentComposer(recipient: String = "") {
+    model.clearOutgoingMessageIssue()
+    composerRecipient = recipient
+    composerRequestID = UUID()
+    showingComposer = true
   }
 
   private var conversationSelection: Binding<String?> {
@@ -860,6 +886,14 @@ private struct ComposeMessageSheet: View {
 
   let messageQueued: (String) -> Void
 
+  init(
+    initialRecipient: String = "",
+    messageQueued: @escaping (String) -> Void
+  ) {
+    _recipient = State(initialValue: initialRecipient)
+    self.messageQueued = messageQueued
+  }
+
   private enum Field {
     case recipient
     case body
@@ -954,7 +988,7 @@ private struct ComposeMessageSheet: View {
     }
     .frame(width: 500)
     .frame(minHeight: 390)
-    .onAppear { focusedField = .recipient }
+    .onAppear { focusedField = recipient.isEmpty ? .recipient : .body }
   }
 }
 

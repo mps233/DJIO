@@ -2,8 +2,15 @@ import Foundation
 
 enum SMSAddressDisplayFormatter {
   static func string(for address: String) -> String {
-    guard address.hasPrefix("+86") else { return address }
-    let localNumber = address.dropFirst(3)
+    let prefix: String
+    let localNumber: Substring
+    if address.hasPrefix("+86") {
+      prefix = "+86 "
+      localNumber = address.dropFirst(3)
+    } else {
+      prefix = ""
+      localNumber = address[...]
+    }
     guard localNumber.count == 11, localNumber.first == "1",
       localNumber.allSatisfy(isASCIIDigit)
     else {
@@ -15,7 +22,7 @@ enum SMSAddressDisplayFormatter {
     let firstGroup = localNumber[..<firstBreak]
     let secondGroup = localNumber[firstBreak..<secondBreak]
     let thirdGroup = localNumber[secondBreak...]
-    return "+86 \(firstGroup) \(secondGroup) \(thirdGroup)"
+    return "\(prefix)\(firstGroup) \(secondGroup) \(thirdGroup)"
   }
 
   private static func isASCIIDigit(_ character: Character) -> Bool {
