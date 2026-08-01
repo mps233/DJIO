@@ -1,7 +1,7 @@
 # DJIO
 
 <p align="center">
-  <img src="docs/assets/djio-icon.png" width="160" alt="DJIO 应用图标">
+  <img src="docs/assets/djio-icon-liquid-glass.png" width="160" alt="DJIO 应用图标">
 </p>
 
 DJIO 是一款原生 macOS 工具，可将受支持的蜂窝 USB 模块用作 Mac 的便携式
