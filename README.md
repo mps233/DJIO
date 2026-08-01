@@ -29,39 +29,33 @@ VoWiFi/IMS 通话。
 
 > 以下截图均使用内置演示数据，不包含真实短信、电话号码或网络信息。
 
-### 连接
-
-![DJIO 连接页面](docs/screenshots/connection.png)
-
-### eSIM
-
-![DJIO eSIM 管理页面](docs/screenshots/esim.png)
-
-<p>
-  <img src="docs/screenshots/add-esim-window.png" width="540" alt="DJIO 添加 eSIM 窗口">
-</p>
-
-### 短信
-
-![DJIO 短信页面](docs/screenshots/messages.png)
-
-### 来电
-
-![DJIO 来电记录页面](docs/screenshots/calls.png)
-
-### 定位
-
-![DJIO 定位页面](docs/screenshots/location.png)
+<div align="center">
+<table>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/connection.png" alt="DJIO 连接页面"></td>
+    <td width="50%"><img src="docs/screenshots/esim.png" alt="DJIO eSIM 管理页面"></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/add-esim-window.png" alt="DJIO 添加 eSIM 窗口"></td>
+    <td width="50%"><img src="docs/screenshots/messages.png" alt="DJIO 短信页面"></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/calls.png" alt="DJIO 来电记录页面"></td>
+    <td width="50%"><img src="docs/screenshots/location.png" alt="DJIO 定位页面"></td>
+  </tr>
+</table>
+</div>
 
 ### 通知
 
-<p>
-  <img src="docs/screenshots/sms-notification.png" width="520" alt="DJIO 短信通知">
-</p>
-
-<p>
-  <img src="docs/screenshots/incoming-call-notification.png" width="520" alt="DJIO 来电通知">
-</p>
+<div align="center">
+<table>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/sms-notification.png" alt="DJIO 短信通知"></td>
+    <td width="50%"><img src="docs/screenshots/incoming-call-notification.png" alt="DJIO 来电通知"></td>
+  </tr>
+</table>
+</div>
 
 来电浮窗中的绿色按钮用于打开 DJIO 的来电页面，不表示接听电话。DJIO 不传输
 通话音频，也不提供接听功能。
