@@ -60,16 +60,19 @@ VoWiFi/IMS 通话。
 来电浮窗中的绿色按钮用于打开 DJIO 的来电页面，不表示接听电话。DJIO 不传输
 通话音频，也不提供接听功能。
 
-## Mac 和 iPad
+## Mac、iPad 与其他 USB 主机
 
-DJIO 本身运行于 macOS。
+DJIO 本身运行于 macOS。模块配置为 ECM 模式后，会向 USB 主机提供一个标准的
+USB 虚拟以太网接口。理论上，支持 USB Host、CDC-ECM 驱动并能为模块供电、配置
+网络的设备都可以使用这条数据连接，例如 macOS、Linux、部分 Windows 设备、
+USB-C iPad、Android 设备或支持 USB 网卡的路由器。
 
-模块配置为 ECM 模式后，兼容的 USB-C iPad 也可以将其数据连接用作 USB
-以太网。iPad 能否使用取决于模块固件、iPad 型号、iPadOS 版本、线材、USB
-供电、APN 和运营商。
+这并不代表所有设备都能直接使用：实际兼容性还取决于主机的 ECM 驱动、USB
+接口和供电、模块固件暴露的 USB 配置、DHCP/APN 设置以及设备自身的网络策略。
+Windows 主机尤其可能需要额外的 CDC-ECM 驱动。
 
-DJIO 不包含 iPadOS 应用。短信管理和来电提醒需要将模块连接到正在运行 DJIO
-的 Mac。
+DJIO 不包含 iPadOS、Windows 或 Android 应用。其他主机可以使用 ECM 网络连接，
+但短信管理、eSIM 管理和来电提醒仍需要将模块连接到正在运行 DJIO 的 Mac。
 
 ## 硬件支持
 
