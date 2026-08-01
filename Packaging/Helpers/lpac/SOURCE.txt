@@ -1,0 +1,32 @@
+DJIO includes a patched macOS universal build of lpac v2.3.0.
+
+Source repository:
+https://github.com/estkme-group/lpac/tree/v2.3.0
+
+Pinned source commit:
+c2fcf5e4b21c712d54e35a11da2ad9ad134fb821
+
+Upstream release ZIP (lpac-darwin-universal-without-lto.zip) SHA-256:
+316aab28b62f635fb153b7c254bfc9499aab75bd4fc3bcac1652e692b6c82a82
+
+Upstream release executable SHA-256:
+ca6af40ed3d6ebf0d966057dc6cc2e6d84e3c837991e03466ae2f97cf3fc1f12
+
+DJIO helper version:
+v2.3.0-djio.1
+
+DJIO helper executable SHA-256:
+f026d231108f66d395e27d650a0d2df96e796d3ca4484b15efe293d20cea37dc
+
+Patch:
+patches/0001-djio-stdio-and-secret-input.patch
+
+The minimal patch fixes the APDU stdio backend's inverted success checks,
+adds a private stdin request for activation/confirmation codes, and makes the
+helper report an auditable DJIO-specific version. The helper remains a separate
+AGPL process and communicates with DJIO only through newline-delimited JSON.
+
+Rebuild with:
+./scripts/build-lpac-helper.sh
+
+See the included LICENSE-lpac, LICENSE-libeuicc, and LICENSE-cjson files.

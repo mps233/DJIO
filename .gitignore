@@ -1,4 +1,5 @@
 .build/
 .build-asan/
 .build-tsan/
+.swiftpm/
 .DS_Store

@@ -54,15 +54,15 @@ struct ConnectionView: View {
         }
       }
 
-      Section("蜂窝网络") {
-        LabeledContent("运营商", value: model.connection.operatorName ?? "未知")
+      Section {
+        LabeledContent("运营商", value: displayedOperatorName)
         ConnectionStatusRow(
           title: "注册状态",
           systemImage: "antenna.radiowaves.left.and.right",
-          value: model.connection.registration,
-          condition: model.connection.cellular
+          value: displayedRegistration,
+          condition: displayedCellularCondition
         )
-        LabeledContent("SIM 状态", value: details.simStatus ?? "未知")
+        LabeledContent("SIM 状态", value: displayedSIMStatus)
         LabeledContent("网络制式", value: details.accessTechnology ?? "未知")
         LabeledContent("频段", value: details.frequencyBand ?? "未知")
         ValueRow(title: "信道", value: details.channel.map(String.init) ?? "未知")
@@ -71,6 +71,14 @@ struct ConnectionView: View {
         SignalMetricRow(title: "RSRQ", value: details.signalRSRQ.map(Double.init), unit: "dB")
         SignalMetricRow(title: "SINR", value: details.signalSINR, unit: "dB")
         ValueRow(title: "固件版本", value: details.firmwareRevision ?? "未知")
+      } header: {
+        Text("蜂窝网络")
+      } footer: {
+        if model.euicc.hasProfilesButNoneEnabled {
+          Text(
+            "当前没有启用的 eSIM。模块仍可扫描附近基站，并报告网络制式、频段、信道和信号测量；这些数据不表示已经注册运营商或可以联网。"
+          )
+        }
       }
 
       Section {
@@ -136,7 +144,17 @@ struct ConnectionView: View {
       } header: {
         Text("短信存储")
       } footer: {
-        Text("SM 为 SIM 卡存储，ME 为模块内部存储。")
+        VStack(alignment: .leading, spacing: 5) {
+          Text("SM 为 SIM 卡存储，ME 为模块内部存储。")
+          if model.euicc.hasProfilesButNoneEnabled {
+            Text("eSIM 未启用时，SM 短信存储可能不可用；ME 模块存储仍可读取。")
+          }
+          if let issue = model.connection.smsIssue, !issue.isEmpty {
+            Label(issue, systemImage: "exclamationmark.triangle.fill")
+              .foregroundStyle(.orange)
+              .textSelection(.enabled)
+          }
+        }
       }
     }
     .formStyle(.grouped)
@@ -208,6 +226,54 @@ struct ConnectionView: View {
 
   private var details: CellularDetails {
     model.connection.cellularDetails
+  }
+
+  private var displayedRegistration: String {
+    if model.euicc.hasProfilesButNoneEnabled { return "eSIM 未启用" }
+    guard model.isRecoveringEuiccConnectivity, model.euicc.hasEnabledProfile else {
+      return model.connection.registration
+    }
+    switch model.connection.registration {
+    case "未知", "未注册": return "正在初始化"
+    case "正在搜索", "正在注册", "注册被拒绝": return "正在注册"
+    default: return model.connection.registration
+    }
+  }
+
+  private var displayedOperatorName: String {
+    if model.euicc.hasProfilesButNoneEnabled { return "不可用" }
+    if model.isRecoveringEuiccConnectivity, model.connection.operatorName == nil {
+      return "正在获取"
+    }
+    return model.connection.operatorName ?? "未知"
+  }
+
+  private var displayedSIMStatus: String {
+    model.euicc.hasProfilesButNoneEnabled ? "eSIM 未启用" : (details.simStatus ?? "未知")
+  }
+
+  private var displayedCellularCondition: LinkCondition {
+    if model.euicc.hasProfilesButNoneEnabled { return .warning }
+    if model.isRecoveringEuiccConnectivity,
+      !["已注册", "漫游"].contains(model.connection.registration)
+    {
+      return .checking
+    }
+    return model.connection.cellular
+  }
+
+  private var displayedECMStatus: String {
+    if model.isRecoveringEuiccConnectivity, model.connection.ecm != .ready {
+      return "正在恢复"
+    }
+    return model.connection.ecm.label
+  }
+
+  private var displayedECMCondition: LinkCondition {
+    if model.isRecoveringEuiccConnectivity, model.connection.ecm != .ready {
+      return .checking
+    }
+    return model.connection.ecm
   }
 
   private var displayedModuleUsageMode: ModuleUsageMode? {
@@ -305,14 +371,14 @@ struct ConnectionView: View {
       ConnectionStatusRow(
         title: "ECM 网卡",
         systemImage: "network",
-        value: model.connection.ecm.label,
-        condition: model.connection.ecm
+        value: displayedECMStatus,
+        condition: displayedECMCondition
       )
       ConnectionStatusRow(
         title: "移动网络",
         systemImage: "antenna.radiowaves.left.and.right",
-        value: model.connection.registration,
-        condition: model.connection.cellular
+        value: displayedRegistration,
+        condition: displayedCellularCondition
       )
     } header: {
       Text("连接状态")

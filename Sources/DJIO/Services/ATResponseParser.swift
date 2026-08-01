@@ -253,7 +253,7 @@ struct ATResponseParser {
       return "中国电信"
     case "CHN-CU", "CHN-UNICOM":
       return "中国联通"
-    case "CHN-CM", "CHN-MOBILE":
+    case "CHN-CM", "CHN-MOBILE", "CHINA MOBILE":
       return "中国移动"
     case "CHN-CBN", "CHN-BROADNET":
       return "中国广电"

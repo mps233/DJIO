@@ -84,7 +84,7 @@ struct ModemServiceTests {
 
     let result = try await service.poll()
     #expect(result.newMessages.count == 2)
-    #expect(result.warnings.contains(where: { $0.contains("模块拒绝清理 SM 第 2 条短信") }))
+    #expect(result.smsWarnings.contains(where: { $0.contains("模块拒绝清理 SM 第 2 条短信") }))
     let commands = await transport.recordedBatches().flatMap { $0 }
     #expect(commands.contains("AT+CMGD=2,0"))
     #expect(commands.contains("AT+CMGD=1,0"))
@@ -152,6 +152,63 @@ struct ModemServiceTests {
     let result = try await service.poll()
     #expect(result.operatorName == nil)
     #expect(result.warnings.contains("模块不支持运营商查询"))
+  }
+
+  @Test func smsStorageRejectionIsReportedSeparatelyFromConnectionWarnings() async throws {
+    let (root, databaseURL) = temporaryDatabase()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let transport = FakeATTransport()
+    await transport.failNext(
+      command: "AT+CPMS=\"SM\",\"SM\",\"SM\"",
+      with: .modemRejected(
+        command: "AT+CPMS=\"SM\",\"SM\",\"SM\"",
+        response: "ERROR"
+      )
+    )
+    let service = try ModemService(databaseURL: databaseURL, transport: transport)
+
+    let result = try await service.poll()
+
+    #expect(result.warnings.isEmpty)
+    #expect(result.smsWarnings.count == 1)
+    #expect(result.smsWarnings[0].contains("模块拒绝读取 SM 短信"))
+  }
+
+  @Test func disabledManagedEuiccSkipsSIMStorageWithoutHidingRadioMeasurements() async throws {
+    let (root, databaseURL) = temporaryDatabase()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let transport = FakeATTransport()
+    let service = try ModemService(databaseURL: databaseURL, transport: transport)
+    await service.updateManagedEuiccState(
+      EuiccSnapshot(
+        available: true,
+        eid: nil,
+        profiles: [
+          EuiccProfile(
+            id: "8901000000000000000",
+            iccid: "8901000000000000000",
+            nickname: nil,
+            serviceProviderName: "Test",
+            profileName: nil,
+            state: .disabled,
+            profileClass: nil
+          )
+        ],
+        lastUpdated: nil,
+        issue: nil
+      )
+    )
+
+    let result = try await service.poll()
+    let commands = await transport.recordedBatches().flatMap { $0 }
+
+    #expect(!commands.contains("AT+CPMS=\"SM\",\"SM\",\"SM\""))
+    #expect(commands.contains("AT+CPMS=\"ME\",\"ME\",\"ME\""))
+    #expect(commands.contains("AT+CSQ"))
+    #expect(commands.contains("AT+QNWINFO"))
+    #expect(result.signalRSSI == -73)
+    #expect(result.cellularDetails.accessTechnology == "FDD LTE")
+    #expect(result.smsWarnings.isEmpty)
   }
 
   @Test func storageTimeoutStopsBeforeTheNextStorage() async throws {
@@ -1305,10 +1362,16 @@ struct ModemServiceTests {
     await transport.emit(raw: "NO CARRIER")
     await transport.emit(raw: "+CLIP: \"10086\",129")
     await transport.emit(raw: "NO ANSWER")
-    try await Task.sleep(for: .milliseconds(50))
 
-    #expect(try await service.calls().count == 2)
-    #expect(Set(try await service.calls().map(\.id)).count == 2)
+    var calls: [IncomingCallRecord] = []
+    for _ in 0..<50 {
+      calls = try await service.calls()
+      if calls.count == 2 { break }
+      try await Task.sleep(for: .milliseconds(10))
+    }
+
+    #expect(calls.count == 2)
+    #expect(Set(calls.map(\.id)).count == 2)
   }
 
   @Test func sendsLongSMSAndPersistsEachModemReference() async throws {

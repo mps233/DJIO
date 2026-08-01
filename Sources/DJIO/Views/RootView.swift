@@ -15,6 +15,13 @@ struct RootView: View {
           ConnectionView()
         }
         .navigationSplitViewStyle(.balanced)
+      case .esim:
+        NavigationSplitView(columnVisibility: $connectionColumnVisibility) {
+          AppSidebar()
+        } detail: {
+          EuiccView()
+        }
+        .navigationSplitViewStyle(.balanced)
       case .messages:
         MessagesView()
       case .calls:
@@ -56,6 +63,10 @@ struct AppSidebar: View {
       Section("当前链路") {
         SidebarStatusRow(label: "ECM", condition: model.connection.ecm)
         SidebarStatusRow(label: "短信", condition: model.connection.control)
+        SidebarStatusRow(
+          label: "eSIM",
+          condition: model.euicc.available ? .ready : (model.euicc.issue == nil ? .unavailable : .warning)
+        )
       }
     }
     .listStyle(.sidebar)
@@ -78,7 +89,7 @@ struct AppSidebar: View {
   }
 
   private var appVersion: String {
-    Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.2"
+    Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.3"
   }
 }
 

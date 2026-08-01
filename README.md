@@ -5,10 +5,10 @@
 </p>
 
 DJIO 是一款原生 macOS 工具，可将受支持的蜂窝 USB 模块用作 Mac 的便携式
-4G 网卡，并提供短信、接码和来电号码记录功能。它可以配置 ECM 网络、收发短信、
-接收验证码，以及记录来电号码和时间。
+4G 网卡，并提供 eSIM 管理、短信、接码和来电号码记录功能。它可以配置 ECM
+网络、管理兼容 eSIM 卡、收发短信、接收验证码，以及记录来电号码和时间。
 
-当前版本：`0.0.2`
+当前版本：`0.0.3`（构建版本 `2`）
 
 DJIO 只记录来电号码，不能接听电话、传输通话音频、提供语音信箱，也不实现
 VoWiFi/IMS 通话。
@@ -17,6 +17,7 @@ VoWiFi/IMS 通话。
 
 - 将兼容模块配置为 ECM 网卡，并可完整恢复第一代大疆 4G 模块的原始 USB 状态
 - 显示连接、SIM 卡、运营商、无线制式、信号和本机流量信息
+- 通过大疆 4G 模块管理兼容的 eSIM 卡：读取 EID、导入运营商二维码或 LPA 激活码、启用或停用 eSIM，以及设置昵称
 - 按需启用模块 GNSS，显示经纬度、海拔、定位精度和卫星数量，并在原生地图上标记当前位置
 - 收发短信，支持长短信、GSM 7-bit 和 Unicode
 - 将验证码作为普通短信接收
@@ -31,6 +32,14 @@ VoWiFi/IMS 通话。
 ### 连接
 
 ![DJIO 连接页面](docs/screenshots/connection.png)
+
+### eSIM
+
+![DJIO eSIM 管理页面](docs/screenshots/esim.png)
+
+<p>
+  <img src="docs/screenshots/add-esim.png" width="540" alt="DJIO 添加 eSIM 弹窗">
+</p>
 
 ### 短信
 
@@ -54,6 +63,9 @@ VoWiFi/IMS 通话。
   <img src="docs/screenshots/incoming-call-notification.png" width="520" alt="DJIO 来电通知">
 </p>
 
+来电浮窗中的绿色按钮用于打开 DJIO 的来电页面，不表示接听电话。DJIO 不传输
+通话音频，也不提供接听功能。
+
 ## Mac 和 iPad
 
 DJIO 本身运行于 macOS。
@@ -74,6 +86,11 @@ DJIO 不包含 iPadOS 应用。短信管理和来电提醒需要将模块连接�
 
 DJIO 的短信与状态查询也可以回退到兼容的 `/dev/cu.*` AT 串口，以 115200
 波特率工作。USB 身份转换和完整恢复必须使用受支持的 USB AT 通道。
+
+eSIM 管理要求卡片实现 GSMA eUICC 本地管理接口，并允许通过模块的 `AT+CSIM`
+通道访问。DJIO 内置独立的 `lpac` 辅助进程，用于下载、启用、停用和设置 eSIM
+昵称；激活码与确认码通过标准输入传递，不会出现在进程命令行中。不同空白 eSIM
+卡、运营商和模块固件的兼容性可能不同。
 
 检测到原厂 `2CA3:4006` 时，经用户确认后，DJIO 会先使用
 `AT+QCFG="usbcfg",0x2C7C,0x0125,1,1,1,1,1,0,0` 将模块持久转换为
@@ -134,13 +151,27 @@ open -n ../outputs/DJIO.app --args --demo
 ```
 
 构建脚本会生成 `../outputs/DJIO.app`，嵌入 Homebrew 提供的 `libusb` 动态库，
-重写其加载路径，并为应用添加本地临时签名。
+内置并校验固定版本的 `lpac` 辅助工具，重写动态库加载路径，并为应用添加本地临时
+签名。
+
+文档截图可使用脱敏演示数据重新生成：
+
+```bash
+open -n ../outputs/DJIO.app --args --demo --preview-connection
+open -n ../outputs/DJIO.app --args --demo --preview-esim
+open -n ../outputs/DJIO.app --args --demo --preview-messages
+open -n ../outputs/DJIO.app --args --demo --preview-calls
+open -n ../outputs/DJIO.app --args --demo --preview-incoming-call
+```
 
 ## 本地数据与隐私
 
 DJIO 不使用账号、分析统计、云同步或外部应用服务器。短信、发件状态、来电记录和
 流量统计均保存在 `~/Library/Application Support/CellularBridge/`。这里有意
 保留了旧版内部目录名，确保升级为 DJIO 后仍可继续使用已有数据。
+
+eSIM 激活码和确认码只在导入期间使用，不会写入 DJIO 数据库。eSIM 的 EID、
+ICCID、运营商名称和昵称来自卡片，界面默认对 EID 与 ICCID 进行遮罩显示。
 
 你发送的短信和网络流量仍会经过移动运营商。通知内容是否在锁定屏幕上显示由
 macOS 通知设置决定。流量统计来自 macOS 网络接口计数器，并非运营商账单数据。
@@ -152,6 +183,7 @@ macOS 通知设置决定。流量统计来自 macOS 网络接口计数器，并�
 - 来电挂断依赖模块支持相关 AT 指令
 - 不提供通话音频、语音信箱、VoWiFi 或 IMS 通话
 - 不保证支持列表之外的硬件
+- eSIM 管理兼容性取决于 eSIM 卡、模块固件、运营商服务器和 `AT+CSIM` 支持情况
 - 来电号码能否获取取决于模块、SIM 卡、运营商和网络
 - GNSS 定位需要模块固件支持、有效的 GNSS 天线和适合接收卫星信号的环境
 

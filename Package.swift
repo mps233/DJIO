@@ -35,8 +35,10 @@ let package = Package(
       linkerSettings: [
         .linkedLibrary("sqlite3"),
         .linkedFramework("IOKit"),
+        .linkedFramework("ImageIO"),
         .linkedFramework("ServiceManagement"),
         .linkedFramework("SystemConfiguration"),
+        .linkedFramework("Vision"),
       ]
     ),
     .testTarget(

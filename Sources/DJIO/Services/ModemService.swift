@@ -53,6 +53,8 @@ actor ModemService {
   private var transportOperationActive = false
   private var transportWaiters: [CheckedContinuation<Void, Never>] = []
   private var outboxDrainActive = false
+  private var managedEuiccHasEnabledProfile: Bool?
+  private var simStorageResumeAt: Date?
 
   init(
     databaseURL: URL = SMSDatabase.defaultURL(),
@@ -88,6 +90,93 @@ actor ModemService {
     }
   }
 
+  func inspectEuicc() async throws -> EuiccSnapshot {
+    await acquireTransportOperation()
+    defer { releaseTransportOperation() }
+    try Task.checkCancellation()
+    do {
+      let descriptor = try await ensureConnected()
+      try await initializeIfNeeded(descriptor: descriptor)
+      let snapshot = try await EuiccAPDUClient(transport: transport).inspect()
+      updateManagedEuiccState(snapshot)
+      return snapshot
+    } catch {
+      resetInitializationAfterTransportFailure(error)
+      throw error
+    }
+  }
+
+  func downloadEuiccProfile(
+    activationCode: EuiccActivationCode,
+    confirmationCode: String?,
+    onProgress: @escaping @Sendable (String) async -> Void
+  ) async throws -> EuiccSnapshot {
+    await acquireTransportOperation()
+    defer { releaseTransportOperation() }
+    try Task.checkCancellation()
+    defer { finishEuiccMutationRecovery() }
+    do {
+      let descriptor = try await ensureConnected()
+      try await initializeIfNeeded(descriptor: descriptor)
+      _ = try await EuiccLPAService(transport: transport).download(
+        activationCode: activationCode,
+        confirmationCode: confirmationCode,
+        onProgress: onProgress
+      )
+      return try await inspectEuiccAfterMutation()
+    } catch {
+      resetInitializationAfterTransportFailure(error)
+      throw error
+    }
+  }
+
+  func setEuiccProfileEnabled(
+    iccid: String,
+    enabled: Bool,
+    onProgress: @escaping @Sendable (String) async -> Void
+  ) async throws -> EuiccSnapshot {
+    await acquireTransportOperation()
+    defer { releaseTransportOperation() }
+    try Task.checkCancellation()
+    defer { finishEuiccMutationRecovery() }
+    do {
+      let descriptor = try await ensureConnected()
+      try await initializeIfNeeded(descriptor: descriptor)
+      _ = try await EuiccLPAService(transport: transport).setProfileEnabled(
+        iccid: iccid,
+        enabled: enabled,
+        onProgress: onProgress
+      )
+      return try await inspectEuiccAfterMutation()
+    } catch {
+      resetInitializationAfterTransportFailure(error)
+      throw error
+    }
+  }
+
+  func setEuiccProfileNickname(
+    iccid: String,
+    nickname: String?,
+    onProgress: @escaping @Sendable (String) async -> Void
+  ) async throws -> EuiccSnapshot {
+    await acquireTransportOperation()
+    defer { releaseTransportOperation() }
+    try Task.checkCancellation()
+    do {
+      let descriptor = try await ensureConnected()
+      try await initializeIfNeeded(descriptor: descriptor)
+      _ = try await EuiccLPAService(transport: transport).setProfileNickname(
+        iccid: iccid,
+        nickname: nickname,
+        onProgress: onProgress
+      )
+      return try await inspectEuiccAfterMutation()
+    } catch {
+      resetInitializationAfterTransportFailure(error)
+      throw error
+    }
+  }
+
   func startGNSS() async throws {
     await acquireTransportOperation()
     defer { releaseTransportOperation() }
@@ -112,6 +201,26 @@ actor ModemService {
       resetInitializationAfterTransportFailure(error)
       throw error
     }
+  }
+
+  private func inspectEuiccAfterMutation() async throws -> EuiccSnapshot {
+    var lastError: Error?
+    for attempt in 0..<5 {
+      do {
+        let descriptor = try await ensureConnected()
+        try await initializeIfNeeded(descriptor: descriptor)
+        let snapshot = try await EuiccAPDUClient(transport: transport).inspect()
+        updateManagedEuiccState(snapshot)
+        return snapshot
+      } catch {
+        lastError = error
+        resetInitializationAfterTransportFailure(error)
+        if attempt < 4 {
+          try await Task.sleep(nanoseconds: 450_000_000)
+        }
+      }
+    }
+    throw lastError ?? EuiccError.invalidResponse("eSIM 操作后无法重新读取 eSIM 卡状态")
   }
 
   func stopGNSS() async throws {
@@ -374,6 +483,8 @@ actor ModemService {
     announcedIncomingAt.removeAll()
     clearActiveIncomingCall()
     resetCachedFirmware()
+    managedEuiccHasEnabledProfile = nil
+    simStorageResumeAt = nil
   }
 
   func setPreferredSerialPath(_ path: String?) {
@@ -397,6 +508,7 @@ actor ModemService {
     let usesMacTimestamp = hasCompletedMessageScan
 
     var warnings: [String] = []
+    var smsWarnings: [String] = []
     var reconciledStorages: Set<String> = []
     let usbNetworkMode: Int?
     if descriptor.usbDeviceIdentifier != nil,
@@ -424,7 +536,9 @@ actor ModemService {
       registrationRaw = response
     } else {
       registrationRaw = ""
-      warnings.append("模块不支持网络注册状态查询")
+      if managedEuiccHasEnabledProfile != false {
+        warnings.append("模块不支持网络注册状态查询")
+      }
     }
     try Task.checkCancellation()
 
@@ -433,13 +547,21 @@ actor ModemService {
       operatorRaw = response
     } else {
       operatorRaw = ""
-      warnings.append("模块不支持运营商查询")
+      if managedEuiccHasEnabledProfile != false {
+        warnings.append("模块不支持运营商查询")
+      }
     }
     try Task.checkCancellation()
 
+    let nowIsBeforeSIMStorageResume = simStorageResumeAt.map { now < $0 } ?? false
+    let skipsSMBecauseNoEnabledProfile = managedEuiccHasEnabledProfile == false
+    let skipsSMForMutationRecovery = !skipsSMBecauseNoEnabledProfile && nowIsBeforeSIMStorageResume
     var records: [ModemStoredPDU] = []
     var storageUsage: [String: SMSStorageUsage] = [:]
     for storage in ["SM", "ME"] {
+      if storage == "SM" && (skipsSMBecauseNoEnabledProfile || skipsSMForMutationRecovery) {
+        continue
+      }
       do {
         var commands = [
           ATCommand("AT+CMGF=0", timeout: 3),
@@ -460,7 +582,7 @@ actor ModemService {
         }
       } catch let error as ModemTransportError {
         guard case .modemRejected = error else { throw error }
-        warnings.append("模块拒绝读取 \(storage) 短信：\(error.localizedDescription)")
+        smsWarnings.append("模块拒绝读取 \(storage) 短信：\(error.localizedDescription)")
       }
       try Task.checkCancellation()
     }
@@ -473,12 +595,12 @@ actor ModemService {
         usesMacTimestamp: usesMacTimestamp,
         reconciledStorages: reconciledStorages
       )
-      warnings.append(contentsOf: importResult.warnings)
+      smsWarnings.append(contentsOf: importResult.warnings)
       if deletesImportedMessages {
-        try await deleteImportedRecords(importResult.deletionIndexes, warnings: &warnings)
+        try await deleteImportedRecords(importResult.deletionIndexes, warnings: &smsWarnings)
       }
       hasCompletedMessageScan = true
-      lastInboxReconciliationAt = now
+      lastInboxReconciliationAt = skipsSMForMutationRecovery ? nil : now
     }
 
     let cellularDetails = try await queryCellularDetails(
@@ -495,8 +617,18 @@ actor ModemService {
       operatorName: parser.operatorName(from: operatorRaw),
       cellularDetails: cellularDetails,
       newMessages: importResult.messages,
-      warnings: warnings
+      warnings: warnings,
+      smsWarnings: smsWarnings
     )
+  }
+
+  func updateManagedEuiccState(_ snapshot: EuiccSnapshot) {
+    managedEuiccHasEnabledProfile = snapshot.hasEnabledProfile
+  }
+
+  private func finishEuiccMutationRecovery() {
+    simStorageResumeAt = Date().addingTimeInterval(15)
+    lastInboxReconciliationAt = nil
   }
 
   private func startUnsolicitedConsumerIfNeeded() async {

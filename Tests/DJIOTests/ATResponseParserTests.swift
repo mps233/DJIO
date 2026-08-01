@@ -108,6 +108,7 @@ struct ATResponseParserTests {
     #expect(parser.operatorName(from: "+COPS: 0,0,\"CHN-CT\",7\r\nOK") == "中国电信")
     #expect(parser.operatorName(from: "+COPS: 0,0,\"CHN-CU\",7\r\nOK") == "中国联通")
     #expect(parser.operatorName(from: "+COPS: 0,0,\"CHN-CM\",7\r\nOK") == "中国移动")
+    #expect(parser.operatorName(from: "+COPS: 0,0,\"CHINA MOBILE\",7\r\nOK") == "中国移动")
     #expect(parser.operatorName(from: "+COPS: 0,0,\"CHN-CBN\",7\r\nOK") == "中国广电")
   }
 

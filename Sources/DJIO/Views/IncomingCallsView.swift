@@ -16,6 +16,7 @@ struct IncomingCallsView: View {
             IncomingCallRow(call: call)
           }
           .listStyle(.inset)
+          .scrollContentBackground(.hidden)
         }
       }
       .frame(maxWidth: .infinity, maxHeight: .infinity)

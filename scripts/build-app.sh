@@ -14,11 +14,20 @@ binary_path="$(
 libusb_prefix="$(brew --prefix libusb)"
 libusb_source="$libusb_prefix/lib/libusb-1.0.0.dylib"
 asset_info="$project_root/.build/assetcatalog_generated_info.plist"
+lpac_source="$project_root/Packaging/Helpers/lpac/lpac"
+lpac_expected_sha256="f026d231108f66d395e27d650a0d2df96e796d3ca4484b15efe293d20cea37dc"
+
+lpac_actual_sha256="$(/usr/bin/shasum -a 256 "$lpac_source" | /usr/bin/awk '{print $1}')"
+if [[ "$lpac_actual_sha256" != "$lpac_expected_sha256" ]]; then
+    echo "lpac helper 校验失败：$lpac_actual_sha256" >&2
+    exit 1
+fi
+"$project_root/scripts/test-lpac-helper.sh"
 
 if [[ -e "$app_path" ]]; then
     /bin/rm -rf -- "$app_path"
 fi
-/bin/mkdir -p "$contents/MacOS" "$contents/Frameworks" "$contents/Resources/Licenses" "$output_root"
+/bin/mkdir -p "$contents/MacOS" "$contents/Frameworks" "$contents/Helpers" "$contents/Resources/Licenses" "$output_root"
 
 /bin/cp "$binary_path" "$contents/MacOS/DJIO"
 /bin/cp "$project_root/Packaging/Info.plist" "$contents/Info.plist"
@@ -33,6 +42,13 @@ if [[ "$app_name" != "DJIO" ]]; then
 fi
 /bin/cp "$libusb_source" "$contents/Frameworks/libusb-1.0.0.dylib"
 /bin/cp "$libusb_prefix/COPYING" "$contents/Resources/Licenses/libusb-LGPL-2.1.txt"
+/bin/cp "$lpac_source" "$contents/Helpers/lpac"
+/bin/chmod 755 "$contents/Helpers/lpac"
+/bin/cp "$project_root/Packaging/Helpers/lpac/LICENSE-lpac" "$contents/Resources/Licenses/lpac-AGPL-3.0.txt"
+/bin/cp "$project_root/Packaging/Helpers/lpac/LICENSE-libeuicc" "$contents/Resources/Licenses/libeuicc-LGPL-2.1.txt"
+/bin/cp "$project_root/Packaging/Helpers/lpac/LICENSE-cjson" "$contents/Resources/Licenses/cjson-MIT.txt"
+/bin/cp "$project_root/Packaging/Helpers/lpac/SOURCE.txt" "$contents/Resources/Licenses/lpac-SOURCE.txt"
+/bin/cp "$project_root/Packaging/Helpers/lpac/patches/0001-djio-stdio-and-secret-input.patch" "$contents/Resources/Licenses/lpac-DJIO.patch"
 
 /usr/bin/xcrun --sdk macosx actool \
     --compile "$contents/Resources" \
@@ -60,6 +76,7 @@ fi
 bundle_identifier="$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$contents/Info.plist")"
 designated_requirement="=designated => identifier \"$bundle_identifier\""
 /usr/bin/codesign --force --sign - "$contents/Frameworks/libusb-1.0.0.dylib"
+/usr/bin/codesign --force --sign - "$contents/Helpers/lpac"
 /usr/bin/codesign \
     --force \
     --sign - \

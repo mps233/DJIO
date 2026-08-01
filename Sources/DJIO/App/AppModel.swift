@@ -26,6 +26,9 @@ final class AppModel: ObservableObject {
   @Published private(set) var isSendingMessage = false
   @Published private(set) var sendingOutgoingMessageID: String?
   @Published private(set) var outgoingMessageIssue: String?
+  @Published private(set) var euicc = EuiccSnapshot.unavailable
+  @Published private(set) var euiccOperation = EuiccOperationState()
+  @Published private(set) var isRecoveringEuiccConnectivity = false
   @Published var selectedMessageID: String?
   @Published private(set) var messageNavigationRequestID: String?
   @Published private(set) var messageCompositionRequest: MessageCompositionRequest?
@@ -60,10 +63,14 @@ final class AppModel: ObservableObject {
   private var outboxSendingTask: Task<Void, Never>?
   private var trafficTask: Task<Void, Never>?
   private var gnssPollingTask: Task<Void, Never>?
+  private var euiccRecoveryRefreshTask: Task<Void, Never>?
   private var trafficSampler = NetworkTrafficSampler()
   private var refreshInProgress = false
   private var pendingForegroundRefresh = false
   private var operationRevision: UInt64 = 0
+  private var euiccRecoveryUntil: Date?
+  private var euiccRecoveryTargetEnabled: Bool?
+  private var cellularRegistrationGraceUntil: Date? = Date().addingTimeInterval(20)
   private enum PendingModemConfigurationPurpose {
     case ecm
     case factoryIdentity
@@ -148,12 +155,14 @@ final class AppModel: ObservableObject {
       if ProcessInfo.processInfo.arguments.contains("--preview-connection") {
         selection = .connection
       }
-      if ProcessInfo.processInfo.arguments.contains("--preview-incoming-call") {
-        presentedIncomingCall = IncomingCallRecord(
-          id: "preview-incoming-call",
-          callerNumber: "15342284706",
-          receivedAt: Date()
-        )
+      if ProcessInfo.processInfo.arguments.contains("--preview-esim") {
+        selection = .esim
+      }
+      if ProcessInfo.processInfo.arguments.contains("--preview-messages") {
+        selection = .messages
+      }
+      if ProcessInfo.processInfo.arguments.contains("--preview-calls") {
+        selection = .calls
       }
     }
     refreshLaunchAtLoginStatus()
@@ -172,6 +181,17 @@ final class AppModel: ObservableObject {
 
   func start() {
     guard pollingTask == nil else { return }
+    if isDemoMode, ProcessInfo.processInfo.arguments.contains("--preview-incoming-call") {
+      Task { [weak self] in
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        guard let self, !Task.isCancelled else { return }
+        presentedIncomingCall = IncomingCallRecord(
+          id: "preview-incoming-call",
+          callerNumber: "15342284706",
+          receivedAt: Date()
+        )
+      }
+    }
     if notificationsEnabled {
       Task { [weak self] in
         await self?.updateNotifications(true)
@@ -186,6 +206,7 @@ final class AppModel: ObservableObject {
         await model.loadMessages()
         await model.loadIncomingCalls()
         await model.loadOutbox()
+        await model.refreshEuicc()
         await model.refresh()
         model.resumeQueuedMessagesIfNeeded()
       }
@@ -224,6 +245,11 @@ final class AppModel: ObservableObject {
     outboxSendingTask = nil
     gnssPollingTask?.cancel()
     gnssPollingTask = nil
+    euiccRecoveryRefreshTask?.cancel()
+    euiccRecoveryRefreshTask = nil
+    euiccRecoveryUntil = nil
+    euiccRecoveryTargetEnabled = nil
+    isRecoveringEuiccConnectivity = false
     let shouldStopGNSS = isGNSSActive && !isDemoMode
     isGNSSActive = false
     isGNSSBusy = false
@@ -311,10 +337,11 @@ final class AppModel: ObservableObject {
       connection.usbNetworkMode = result.usbNetworkMode
       connection.transportDescription = result.transport.summary
       connection.signalRSSI = result.signalRSSI
-      connection.registration = result.registration
+      connection.registration = stabilizedRegistration(result.registration)
       connection.operatorName = result.operatorName
       connection.cellularDetails = result.cellularDetails
       connection.cellular = ["已注册", "漫游"].contains(result.registration) ? .ready : .warning
+      connection.smsIssue = result.smsWarnings.first
       connection.lastUpdated = Date()
       let modeSwitchIssue = await pendingModemConfigurationIssue(
         observedUSBIdentity: result.transport.usbDeviceIdentifier,
@@ -325,6 +352,7 @@ final class AppModel: ObservableObject {
         modeSwitchIssue
         ?? result.warnings.first
         ?? (result.usbNetworkMode == 0 ? nil : networkIssue)
+      finishEuiccRecoveryIfReady(registration: result.registration)
       if !result.newMessages.isEmpty {
         await loadMessages()
         for message in result.newMessages where !message.isRead {
@@ -341,6 +369,14 @@ final class AppModel: ObservableObject {
         await postNotification(for: message)
       }
       guard revision == operationRevision else { return }
+      if isWithinEuiccRecoveryWindow {
+        connection.device = connection.usbDeviceIdentifier == nil ? .checking : .ready
+        connection.control = .checking
+        connection.cellular = .checking
+        connection.issue = nil
+        connection.smsIssue = nil
+        return
+      }
       connection.device = connection.ecm == .ready ? .ready : .unavailable
       connection.control = .unavailable
       connection.cellular = .unavailable
@@ -348,9 +384,407 @@ final class AppModel: ObservableObject {
       connection.usbEnumerationIdentifier = nil
       connection.usbNetworkMode = nil
       connection.cellularDetails = CellularDetails()
+      connection.smsIssue = nil
       connection.transportDescription = "等待 AT 通道"
       connection.issue = transportIssue
     }
+  }
+
+  func refreshEuicc() async {
+    guard !euiccOperation.isActive else { return }
+    euiccOperation = EuiccOperationState(
+      phase: .inspecting,
+      progress: nil,
+      detail: "正在通过大疆模块读取 9eSIM",
+      issue: nil
+    )
+    defer {
+      if euiccOperation.phase == .inspecting {
+        euiccOperation.phase = .finished
+      }
+    }
+
+    if isDemoMode {
+      euicc = EuiccSnapshot(
+        available: true,
+        eid: "89044045846727494800000000000000",
+        profiles: [],
+        lastUpdated: Date(),
+        issue: nil
+      )
+      euiccOperation.detail = "已读取空白 eSIM 卡"
+      return
+    }
+
+    guard let service else {
+      euicc = .unavailable
+      euicc.issue = "AT 通道不可用"
+      euiccOperation.issue = euicc.issue
+      return
+    }
+
+    do {
+      euicc = try await inspectEuiccWithRetry(using: service)
+      if euicc.hasProfilesButNoneEnabled {
+        connection.smsIssue = nil
+      }
+      euiccOperation.detail = euicc.profiles.isEmpty
+        ? "已读取空白 eSIM 卡"
+        : "已读取 \(euicc.profiles.count) 个 eSIM"
+    } catch {
+      euicc = .unavailable
+      euicc.issue = error.localizedDescription
+      euiccOperation.issue = error.localizedDescription
+      euiccOperation.detail = nil
+    }
+  }
+
+  func downloadEuiccProfile(activationCode: String, confirmationCode: String) async -> Bool {
+    guard !euiccOperation.isActive else { return false }
+    let parsed: EuiccActivationCode
+    do {
+      parsed = try EuiccActivationCode(activationCode)
+    } catch {
+      euiccOperation = EuiccOperationState(
+        phase: .finished,
+        progress: nil,
+        detail: nil,
+        issue: error.localizedDescription
+      )
+      return false
+    }
+
+    guard let service else {
+      euiccOperation = EuiccOperationState(
+        phase: .finished,
+        progress: nil,
+        detail: nil,
+        issue: "AT 通道不可用"
+      )
+      return false
+    }
+
+    euiccOperation = EuiccOperationState(
+      phase: .downloading,
+      progress: nil,
+      detail: "正在连接 \(parsed.smdpAddress)",
+      issue: nil
+    )
+    beginEuiccRecoveryWindow(targetEnabled: nil)
+    defer { scheduleEuiccRecoveryRefresh() }
+    do {
+      euicc = try await service.downloadEuiccProfile(
+        activationCode: parsed,
+        confirmationCode: confirmationCode.nilIfEmpty,
+        onProgress: { [weak self] message in
+          await self?.updateEuiccProgress(message)
+        }
+      )
+      euiccOperation = EuiccOperationState(
+        phase: .finished,
+        progress: 1,
+        detail: "eSIM 已安装",
+        issue: nil
+      )
+      return true
+    } catch {
+      if let refreshed = try? await inspectEuiccWithRetry(using: service) {
+        euicc = refreshed
+      }
+      euiccOperation = EuiccOperationState(
+        phase: .finished,
+        progress: nil,
+        detail: "已重新检查 eSIM 卡状态",
+        issue: error.localizedDescription
+      )
+      return false
+    }
+  }
+
+  func setEuiccProfileEnabled(iccid: String, enabled: Bool) async -> Bool {
+    guard !euiccOperation.isActive else { return false }
+
+    let requestedState: EuiccProfileState = enabled ? .enabled : .disabled
+    if euicc.profiles.first(where: { $0.iccid == iccid })?.state == requestedState {
+      euiccOperation = EuiccOperationState(
+        phase: .finished,
+        progress: 1,
+        detail: enabled ? "此 eSIM 已经启用" : "此 eSIM 已经停用",
+        issue: nil
+      )
+      return true
+    }
+
+    guard let service else {
+      euiccOperation = EuiccOperationState(
+        phase: .finished,
+        progress: nil,
+        detail: nil,
+        issue: "AT 通道不可用"
+      )
+      return false
+    }
+
+    euiccOperation = EuiccOperationState(
+      phase: enabled ? .enabling : .disabling,
+      progress: nil,
+      detail: enabled ? "正在启用 eSIM" : "正在停用 eSIM",
+      issue: nil
+    )
+    beginEuiccRecoveryWindow(targetEnabled: enabled)
+    defer { scheduleEuiccRecoveryRefresh() }
+
+    do {
+      euicc = try await service.setEuiccProfileEnabled(
+        iccid: iccid,
+        enabled: enabled,
+        onProgress: { [weak self] message in
+          await self?.updateEuiccProgress(message)
+        }
+      )
+      euiccOperation = EuiccOperationState(
+        phase: .finished,
+        progress: 1,
+        detail: enabled ? "eSIM 已启用" : "eSIM 已停用",
+        issue: nil
+      )
+      return true
+    } catch {
+      if let refreshed = try? await inspectEuiccWithRetry(using: service) {
+        euicc = refreshed
+        if let refreshedProfile = refreshed.profiles.first(where: { $0.iccid == iccid }),
+          refreshedProfile.state == requestedState
+        {
+          euiccOperation = EuiccOperationState(
+            phase: .finished,
+            progress: 1,
+            detail: enabled
+              ? "命令返回异常，但已重新读取并确认 eSIM 已启用"
+              : "命令返回异常，但已重新读取并确认 eSIM 已停用",
+            issue: nil
+          )
+          return true
+        }
+        euiccOperation = EuiccOperationState(
+          phase: .finished,
+          progress: nil,
+          detail: "已重新读取 eSIM 卡状态",
+          issue: profileOperationIssue(
+            error,
+            enabled: enabled,
+            confirmedState: refreshed.profiles.first(where: { $0.iccid == iccid })?.state
+          )
+        )
+        return false
+      }
+      euiccOperation = EuiccOperationState(
+        phase: .finished,
+        progress: nil,
+        detail: "操作结果尚未确认",
+        issue: "模块在 eSIM 操作期间返回异常，且暂时无法重新读取 eSIM 卡状态：\(error.localizedDescription) 请稍后点击刷新确认。"
+      )
+      return false
+    }
+  }
+
+  func setEuiccProfileNickname(iccid: String, nickname: String) async -> Bool {
+    guard !euiccOperation.isActive else { return false }
+    let normalizedNickname = nickname.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+    guard let currentProfile = euicc.profiles.first(where: { $0.iccid == iccid }) else {
+      euiccOperation = EuiccOperationState(
+        phase: .finished,
+        progress: nil,
+        detail: nil,
+        issue: "找不到要重命名的 eSIM，请刷新后重试。"
+      )
+      return false
+    }
+    if currentProfile.nickname?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+      == normalizedNickname
+    {
+      return true
+    }
+
+    if isDemoMode {
+      euicc.profiles = euicc.profiles.map { profile in
+        guard profile.iccid == iccid else { return profile }
+        return EuiccProfile(
+          id: profile.id,
+          iccid: profile.iccid,
+          nickname: normalizedNickname,
+          serviceProviderName: profile.serviceProviderName,
+          profileName: profile.profileName,
+          state: profile.state,
+          profileClass: profile.profileClass
+        )
+      }
+      euiccOperation = EuiccOperationState(
+        phase: .finished,
+        progress: 1,
+        detail: normalizedNickname == nil ? "已恢复运营商名称" : "eSIM 名称已更新",
+        issue: nil
+      )
+      return true
+    }
+
+    guard let service else {
+      euiccOperation = EuiccOperationState(
+        phase: .finished,
+        progress: nil,
+        detail: nil,
+        issue: "AT 通道不可用"
+      )
+      return false
+    }
+
+    euiccOperation = EuiccOperationState(
+      phase: .renaming,
+      progress: nil,
+      detail: "正在保存 eSIM 名称",
+      issue: nil
+    )
+    do {
+      euicc = try await service.setEuiccProfileNickname(
+        iccid: iccid,
+        nickname: normalizedNickname,
+        onProgress: { [weak self] message in
+          await self?.updateEuiccProgress(message, phase: .renaming)
+        }
+      )
+      euiccOperation = EuiccOperationState(
+        phase: .finished,
+        progress: 1,
+        detail: normalizedNickname == nil ? "已恢复运营商名称" : "eSIM 名称已更新",
+        issue: nil
+      )
+      return true
+    } catch {
+      if let refreshed = try? await inspectEuiccWithRetry(using: service) {
+        euicc = refreshed
+        let confirmedNickname = refreshed.profiles
+          .first(where: { $0.iccid == iccid })?
+          .nickname?
+          .trimmingCharacters(in: .whitespacesAndNewlines)
+          .nilIfEmpty
+        if confirmedNickname == normalizedNickname {
+          euiccOperation = EuiccOperationState(
+            phase: .finished,
+            progress: 1,
+            detail: normalizedNickname == nil
+              ? "命令返回异常，但已确认运营商名称已恢复"
+              : "命令返回异常，但已确认 eSIM 名称已更新",
+            issue: nil
+          )
+          return true
+        }
+      }
+      euiccOperation = EuiccOperationState(
+        phase: .finished,
+        progress: nil,
+        detail: "eSIM 名称未更改",
+        issue: error.localizedDescription
+      )
+      return false
+    }
+  }
+
+  private func updateEuiccProgress(_ message: String, phase: EuiccOperationPhase? = nil) {
+    euiccOperation.phase = phase ?? (message.contains("写入") ? .installing : .downloading)
+    euiccOperation.detail = message
+    euiccOperation.issue = nil
+  }
+
+  private func inspectEuiccWithRetry(using service: ModemService) async throws -> EuiccSnapshot {
+    var lastError: Error?
+    for attempt in 0..<3 {
+      do {
+        return try await service.inspectEuicc()
+      } catch {
+        lastError = error
+        if attempt < 2 {
+          try? await Task.sleep(nanoseconds: 450_000_000)
+        }
+      }
+    }
+    throw lastError ?? EuiccError.notConnected
+  }
+
+  private var isWithinEuiccRecoveryWindow: Bool {
+    guard let euiccRecoveryUntil else { return false }
+    return Date() < euiccRecoveryUntil
+  }
+
+  private func beginEuiccRecoveryWindow(targetEnabled: Bool?) {
+    euiccRecoveryUntil = Date().addingTimeInterval(20)
+    euiccRecoveryTargetEnabled = targetEnabled
+    isRecoveringEuiccConnectivity = true
+    cellularRegistrationGraceUntil = Date().addingTimeInterval(25)
+    connection.issue = nil
+    connection.smsIssue = nil
+  }
+
+  private func scheduleEuiccRecoveryRefresh() {
+    euiccRecoveryRefreshTask?.cancel()
+    euiccRecoveryRefreshTask = Task { [weak self] in
+      try? await Task.sleep(nanoseconds: 1_500_000_000)
+      guard !Task.isCancelled, let self else { return }
+      await self.refresh(showActivity: false)
+    }
+  }
+
+  private func finishEuiccRecoveryIfReady(registration: String) {
+    guard let euiccRecoveryUntil else { return }
+    if Date() >= euiccRecoveryUntil {
+      finishEuiccRecovery()
+      return
+    }
+
+    let isReady: Bool
+    switch euiccRecoveryTargetEnabled {
+    case true:
+      isReady = connection.ecm == .ready && ["已注册", "漫游"].contains(registration)
+    case false:
+      isReady = connection.ecm == .ready
+    case nil:
+      isReady = true
+    }
+    if isReady {
+      finishEuiccRecovery()
+    }
+  }
+
+  private func finishEuiccRecovery() {
+    euiccRecoveryUntil = nil
+    euiccRecoveryTargetEnabled = nil
+    isRecoveringEuiccConnectivity = false
+    euiccRecoveryRefreshTask?.cancel()
+    euiccRecoveryRefreshTask = nil
+  }
+
+  private func stabilizedRegistration(_ value: String) -> String {
+    if value == "已注册" || value == "漫游" {
+      cellularRegistrationGraceUntil = nil
+      return value
+    }
+    if value == "注册被拒绝", let graceUntil = cellularRegistrationGraceUntil,
+      Date() < graceUntil
+    {
+      return "正在注册"
+    }
+    return value
+  }
+
+  private func profileOperationIssue(
+    _ error: Error,
+    enabled: Bool,
+    confirmedState: EuiccProfileState?
+  ) -> String {
+    let detail = error.localizedDescription
+    if let confirmedState {
+      return "操作未达到目标状态。重新读取确认此 eSIM 当前为“\(confirmedState.title)”；模块返回：\(detail)"
+    }
+    guard !enabled, detail.contains("6985") else { return detail }
+    return "停用命令后暂时无法读取 eSIM 卡状态（APDU 状态字 6985：当前条件不满足）。请稍后刷新；界面只会根据重新读取到的真实 eSIM 状态判断操作结果。"
   }
 
   func startGNSS() {
@@ -1326,7 +1760,7 @@ final class AppModel: ObservableObject {
             self.presentedIncomingCall = nil
           }
         case .warning(let warning):
-          self.connection.issue = warning
+          self.connection.smsIssue = warning
         }
       }
     }
@@ -1707,6 +2141,23 @@ final class AppModel: ObservableObject {
       dayStartedAt: Calendar.current.startOfDay(for: now),
       monthStartedAt: Calendar.current.date(
         from: Calendar.current.dateComponents([.year, .month], from: now)) ?? now
+    )
+    euicc = EuiccSnapshot(
+      available: true,
+      eid: "89044045846727494800000000000000",
+      profiles: [
+        EuiccProfile(
+          id: "89860000000000004799",
+          iccid: "89860000000000004799",
+          nickname: "随身网络",
+          serviceProviderName: "示例运营商",
+          profileName: "Demo_4G_001",
+          state: .enabled,
+          profileClass: "operational"
+        )
+      ],
+      lastUpdated: now,
+      issue: nil
     )
     messages = [
       SMSMessage(

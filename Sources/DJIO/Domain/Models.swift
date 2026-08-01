@@ -2,6 +2,7 @@ import Foundation
 
 enum NavigationDestination: String, CaseIterable, Identifiable {
   case connection
+  case esim
   case messages
   case calls
 
@@ -10,6 +11,7 @@ enum NavigationDestination: String, CaseIterable, Identifiable {
   var title: String {
     switch self {
     case .connection: return "连接"
+    case .esim: return "eSIM"
     case .messages: return "短信"
     case .calls: return "来电"
     }
@@ -18,6 +20,7 @@ enum NavigationDestination: String, CaseIterable, Identifiable {
   var systemImage: String {
     switch self {
     case .connection: return "point.3.connected.trianglepath.dotted"
+    case .esim: return "simcard.2"
     case .messages: return "message"
     case .calls: return "phone.arrow.down.left"
     }
@@ -68,6 +71,7 @@ struct ConnectionSnapshot: Sendable, Equatable {
   var cellularDetails = CellularDetails()
   var lastUpdated: Date?
   var issue: String?
+  var smsIssue: String?
 
   static let disconnected = ConnectionSnapshot()
 
@@ -560,6 +564,7 @@ struct ModemPollResult: Sendable {
   let cellularDetails: CellularDetails
   let newMessages: [SMSMessage]
   let warnings: [String]
+  let smsWarnings: [String]
 }
 
 enum ModemMessageEvent: Sendable {
