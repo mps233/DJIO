@@ -89,7 +89,7 @@ struct AppSidebar: View {
   }
 
   private var appVersion: String {
-    Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.3"
+    Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.4"
   }
 }
 

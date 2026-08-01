@@ -1,4 +1,5 @@
 import Combine
+import Foundation
 import Testing
 
 @testable import DJIO
@@ -21,7 +22,34 @@ struct MenuBarStatusModelTests {
     #expect(model.isRefreshing)
   }
 
-  @Test func retainsTrafficWithoutPublishingItAsMenuState() {
+  @Test func keepsLatestUnreadMessagePreview() {
+    let model = MenuBarStatusModel()
+    let timestamp = Date(timeIntervalSince1970: 1_700_000_000)
+    let message = SMSMessage(
+      id: "message-1",
+      sender: "10086",
+      body: "您的验证码是 123456",
+      receivedAt: timestamp,
+      serviceCenterAt: timestamp,
+      usesMacTimestamp: true,
+      storage: "ME",
+      modemIndex: 1,
+      rawPDU: "",
+      isRead: false
+    )
+
+    model.updateLatestUnreadMessage(message)
+
+    #expect(model.latestUnreadMessage?.id == "message-1")
+    #expect(model.latestUnreadMessage?.sender == "10086")
+    #expect(model.latestUnreadMessage?.body == "您的验证码是 123456")
+    #expect(model.latestUnreadMessage?.date == timestamp)
+
+    model.updateLatestUnreadMessage(nil)
+    #expect(model.latestUnreadMessage == nil)
+  }
+
+  @Test func publishesLatestTrafficForMenuState() {
     let model = MenuBarStatusModel()
     var publicationCount = 0
     let observation = model.objectWillChange.sink {
@@ -38,7 +66,7 @@ struct MenuBarStatusModelTests {
     model.updateTraffic(traffic)
 
     #expect(model.trafficSnapshot() == traffic)
-    #expect(publicationCount == 0)
+    #expect(publicationCount > 0)
     withExtendedLifetime(observation) {}
   }
 }

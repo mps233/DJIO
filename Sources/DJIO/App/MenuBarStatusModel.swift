@@ -1,13 +1,27 @@
 import Foundation
 
+struct MenuBarMessagePreview: Equatable, Sendable {
+  let id: String
+  let sender: String
+  let body: String
+  let date: Date
+
+  init(message: SMSMessage) {
+    id = message.id
+    sender = message.sender
+    body = message.preview
+    date = message.timelineAt
+  }
+}
+
 @MainActor
 final class MenuBarStatusModel: ObservableObject {
   @Published private(set) var statusText = "移动网络未连接"
   @Published private(set) var isConnected = false
   @Published private(set) var unreadCount = 0
+  @Published private(set) var latestUnreadMessage: MenuBarMessagePreview?
   @Published private(set) var isRefreshing = false
-
-  private var latestTraffic = NetworkTrafficSnapshot.unavailable
+  @Published private(set) var traffic = NetworkTrafficSnapshot.unavailable
 
   func update(connection: ConnectionSnapshot) {
     let connected = connection.cellular == .ready
@@ -26,6 +40,13 @@ final class MenuBarStatusModel: ObservableObject {
     }
   }
 
+  func updateLatestUnreadMessage(_ message: SMSMessage?) {
+    let preview = message.map(MenuBarMessagePreview.init)
+    if latestUnreadMessage != preview {
+      latestUnreadMessage = preview
+    }
+  }
+
   func updateRefreshing(_ refreshing: Bool) {
     if isRefreshing != refreshing {
       isRefreshing = refreshing
@@ -33,10 +54,12 @@ final class MenuBarStatusModel: ObservableObject {
   }
 
   func updateTraffic(_ traffic: NetworkTrafficSnapshot) {
-    latestTraffic = traffic
+    if self.traffic != traffic {
+      self.traffic = traffic
+    }
   }
 
   func trafficSnapshot() -> NetworkTrafficSnapshot {
-    latestTraffic
+    traffic
   }
 }

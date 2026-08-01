@@ -111,6 +111,17 @@ final class AppModel: ObservableObject {
 
   var unreadCount: Int { messages.filter { !$0.isRead }.count }
 
+  var latestUnreadMessage: SMSMessage? {
+    messages
+      .filter { !$0.isRead }
+      .max {
+        if $0.timelineAt != $1.timelineAt {
+          return $0.timelineAt < $1.timelineAt
+        }
+        return $0.id < $1.id
+      }
+  }
+
   var gnssStatusText: String {
     if isGNSSBusy { return "正在处理" }
     if isGNSSActive {
@@ -1974,6 +1985,7 @@ final class AppModel: ObservableObject {
 
   private func updateUnreadIndicators() {
     menuBarStatus.updateUnreadCount(unreadCount)
+    menuBarStatus.updateLatestUnreadMessage(latestUnreadMessage)
     dockBadgeController.updateUnreadCount(unreadCount)
   }
 

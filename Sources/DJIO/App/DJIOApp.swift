@@ -142,7 +142,7 @@ struct DJIOApp: App {
   }
 
   var body: some Scene {
-    WindowGroup("DJIO", id: "main") {
+    Window("DJIO", id: "main") {
       RootView()
         .environmentObject(model)
         .background {
@@ -177,8 +177,10 @@ struct DJIOApp: App {
     ) {
       MenuBarView(
         status: menuBarStatus,
-        trafficProvider: { model.menuBarStatus.trafficSnapshot() },
         refresh: { Task { await model.refresh() } },
+        openMessage: { id in
+          Task { await model.openMessageFromNotification(id) }
+        },
         quit: {
           model.stop()
           NSApp.terminate(nil)
