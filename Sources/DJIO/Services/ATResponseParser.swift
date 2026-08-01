@@ -362,6 +362,36 @@ struct ATResponseParser {
     )
   }
 
+  func gnssLocation(from response: String) -> GNSSLocation? {
+    guard
+      let line = normalizedLines(response).first(where: {
+        $0.uppercased().hasPrefix("+QGPSLOC:")
+      }),
+      let fields = atFields(in: line, prefix: "+QGPSLOC:"),
+      fields.count >= 11,
+      let latitude = finiteDouble(fields[1]),
+      let longitude = finiteDouble(fields[2]),
+      (-90...90).contains(latitude),
+      (-180...180).contains(longitude)
+    else {
+      return nil
+    }
+
+    return GNSSLocation(
+      latitude: latitude,
+      longitude: longitude,
+      horizontalDOP: finiteDouble(fields[3]),
+      altitudeMeters: finiteDouble(fields[4]),
+      fixMode: Int(fields[5]),
+      courseDegrees: finiteDouble(fields[6]),
+      speedKmh: finiteDouble(fields[7]),
+      speedKnots: finiteDouble(fields[8]),
+      utcTime: nonempty(fields[0]),
+      utcDate: nonempty(fields[9]),
+      satellites: nonnegativeInteger(fields[10])
+    )
+  }
+
   func servingCellDetails(from response: String) -> ParsedRadioDetails {
     let rows = normalizedLines(response).compactMap { line -> [String]? in
       guard line.hasPrefix("+QENG:") else { return nil }
@@ -459,6 +489,11 @@ struct ATResponseParser {
     else {
       return nil
     }
+    return parsed
+  }
+
+  private func finiteDouble(_ value: String) -> Double? {
+    guard let parsed = Double(value), parsed.isFinite else { return nil }
     return parsed
   }
 

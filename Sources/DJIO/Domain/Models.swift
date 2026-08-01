@@ -487,6 +487,20 @@ struct CellularDetails: Sendable, Equatable {
   var smsStorageUsage: [SMSStorageUsage] = []
 }
 
+struct GNSSLocation: Sendable, Equatable {
+  let latitude: Double
+  let longitude: Double
+  let horizontalDOP: Double?
+  let altitudeMeters: Double?
+  let fixMode: Int?
+  let courseDegrees: Double?
+  let speedKmh: Double?
+  let speedKnots: Double?
+  let utcTime: String?
+  let utcDate: String?
+  let satellites: Int?
+}
+
 struct SMSMessage: Identifiable, Sendable, Hashable {
   let id: String
   let sender: String

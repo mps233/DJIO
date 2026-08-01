@@ -62,13 +62,23 @@ struct AppSidebar: View {
     .navigationTitle("DJIO")
     .navigationSplitViewColumnWidth(min: 180, ideal: 210, max: 245)
     .safeAreaInset(edge: .bottom) {
-      if model.isDemoMode {
-        Label("演示模式", systemImage: "play.rectangle")
-          .font(.caption)
-          .foregroundStyle(.secondary)
-          .padding(.vertical, 10)
+      HStack {
+        if model.isDemoMode {
+          Label("演示模式", systemImage: "play.rectangle")
+        } else {
+          Text("DJIO · v\(appVersion)")
+        }
+        Spacer()
       }
+      .font(.caption)
+      .foregroundStyle(.tertiary)
+      .padding(.horizontal, 12)
+      .padding(.vertical, 10)
     }
+  }
+
+  private var appVersion: String {
+    Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.2"
   }
 }
 

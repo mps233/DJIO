@@ -972,6 +972,40 @@ struct ModemServiceTests {
     #expect(commands.filter { $0 == "AT+QENG=\"servingcell\"" }.count == 2)
   }
 
+  @Test func startsQueriesAndStopsGNSS() async throws {
+    let (root, databaseURL) = temporaryDatabase()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let transport = FakeATTransport()
+    let service = try ModemService(databaseURL: databaseURL, transport: transport)
+
+    try await service.startGNSS()
+    let location = try await service.queryGNSSLocation()
+    try await service.stopGNSS()
+
+    #expect(location?.latitude == 31.2304)
+    #expect(location?.longitude == 121.4737)
+    #expect(location?.satellites == 12)
+    let commands = await transport.recordedBatches().flatMap { $0 }
+    #expect(commands.contains("AT+QGPS=?"))
+    #expect(commands.contains("AT+QGPS=1"))
+    #expect(commands.contains("AT+QGPSLOC=2"))
+    #expect(commands.contains("AT+QGPSEND"))
+  }
+
+  @Test func treatsGNSSNotFixedAsAWaitingState() async throws {
+    let (root, databaseURL) = temporaryDatabase()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let transport = FakeATTransport()
+    await transport.failNext(
+      command: "AT+QGPSLOC=2",
+      with: .modemRejected(command: "AT+QGPSLOC=2", response: "+CME ERROR: Not fixed now")
+    )
+    let service = try ModemService(databaseURL: databaseURL, transport: transport)
+
+    try await service.startGNSS()
+    #expect(try await service.queryGNSSLocation() == nil)
+  }
+
   @Test func unsupportedExtendedQueriesDegradeWithoutFailingPoll() async throws {
     let (root, databaseURL) = temporaryDatabase()
     defer { try? FileManager.default.removeItem(at: root) }
@@ -1575,6 +1609,10 @@ private actor FakeATTransport: ATTransporting {
       case "AT+QENG=\"servingcell\"":
         raw =
           "\r\n+QENG: \"servingcell\",\"NOCONN\",\"LTE\",\"FDD\",460,00,5F1EA01,383,1650,3,5,5,3A7D,-94,-10,-67,11,13\r\nOK\r\n"
+      case "AT+QGPS=?": raw = "\r\n+QGPS: (1-4)\r\nOK\r\n"
+      case "AT+QGPSLOC=2":
+        raw =
+          "\r\n+QGPSLOC: 015846.0,31.230400,121.473700,0.8,4.0,3,0.0,0.0,0.0,010826,12\r\nOK\r\n"
       case "AT+CLCC": raw = clccResponse
       case let text where text.hasPrefix("AT+CPMS="):
         raw =

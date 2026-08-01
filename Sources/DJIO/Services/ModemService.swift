@@ -88,6 +88,78 @@ actor ModemService {
     }
   }
 
+  func startGNSS() async throws {
+    await acquireTransportOperation()
+    defer { releaseTransportOperation() }
+    try Task.checkCancellation()
+    do {
+      let descriptor = try await ensureConnected()
+      try await initializeIfNeeded(descriptor: descriptor)
+      _ = try await transport.perform([
+        ATCommand("AT+QGPS=?", timeout: 3),
+        ATCommand("AT+QGPS=1", timeout: 8),
+      ])
+    } catch let error as ModemTransportError {
+      if case .modemRejected(_, let response) = error {
+        let normalized = response.uppercased()
+        if normalized.contains("504") || normalized.contains("SESSION IS ONGOING") {
+          return
+        }
+      }
+      resetInitializationAfterTransportFailure(error)
+      throw error
+    } catch {
+      resetInitializationAfterTransportFailure(error)
+      throw error
+    }
+  }
+
+  func stopGNSS() async throws {
+    await acquireTransportOperation()
+    defer { releaseTransportOperation() }
+    try Task.checkCancellation()
+    do {
+      let descriptor = try await ensureConnected()
+      try await initializeIfNeeded(descriptor: descriptor)
+      do {
+        _ = try await transport.perform([
+          ATCommand("AT+QGPSEND", timeout: 5)
+        ])
+      } catch let error as ModemTransportError {
+        guard case .modemRejected = error else { throw error }
+      }
+    } catch {
+      resetInitializationAfterTransportFailure(error)
+      throw error
+    }
+  }
+
+  func queryGNSSLocation() async throws -> GNSSLocation? {
+    await acquireTransportOperation()
+    defer { releaseTransportOperation() }
+    try Task.checkCancellation()
+    do {
+      let descriptor = try await ensureConnected()
+      try await initializeIfNeeded(descriptor: descriptor)
+      let response = try await transport.perform([
+        ATCommand("AT+QGPSLOC=2", timeout: 8)
+      ]).first?.raw ?? ""
+      return parser.gnssLocation(from: response)
+    } catch let error as ModemTransportError {
+      if case .modemRejected(_, let response) = error {
+        let normalized = response.uppercased()
+        if normalized.contains("516") || normalized.contains("NOT FIXED NOW") {
+          return nil
+        }
+      }
+      resetInitializationAfterTransportFailure(error)
+      throw error
+    } catch {
+      resetInitializationAfterTransportFailure(error)
+      throw error
+    }
+  }
+
   func incomingMessages() async -> AsyncStream<ModemMessageEvent> {
     let id = UUID()
     let (stream, continuation) = AsyncStream.makeStream(

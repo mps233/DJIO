@@ -41,4 +41,23 @@ struct CellularDetailsParserTests {
     #expect(servingCell.signalRSRQ == -10)
     #expect(servingCell.signalSINR == 11)
   }
+
+  @Test func parsesQuectelGNSSLocationInDecimalMode() {
+    let location = parser.gnssLocation(
+      from:
+        "+QGPSLOC: 015846.0,31.230400,121.473700,0.8,4.0,3,0.0,0.0,0.0,010826,12\r\nOK"
+    )
+
+    #expect(location?.latitude == 31.2304)
+    #expect(location?.longitude == 121.4737)
+    #expect(location?.horizontalDOP == 0.8)
+    #expect(location?.altitudeMeters == 4.0)
+    #expect(location?.fixMode == 3)
+    #expect(location?.courseDegrees == 0)
+    #expect(location?.speedKmh == 0)
+    #expect(location?.speedKnots == 0)
+    #expect(location?.utcTime == "015846.0")
+    #expect(location?.utcDate == "010826")
+    #expect(location?.satellites == 12)
+  }
 }

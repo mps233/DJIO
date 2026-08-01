@@ -33,6 +33,11 @@ final class AppModel: ObservableObject {
     didSet { menuBarStatus.updateRefreshing(isRefreshing) }
   }
   @Published var isSwitchingMode = false
+  @Published private(set) var gnssLocation: GNSSLocation?
+  @Published private(set) var isGNSSActive = false
+  @Published private(set) var isGNSSBusy = false
+  @Published private(set) var gnssIssue: String?
+  @Published private(set) var gnssLastUpdated: Date?
   @Published private(set) var modeSwitchDestination: ModuleUsageMode?
   @Published var showingModeConfirmation = false
   @Published private(set) var modeConfirmationAllowsFactoryIdentityRewrite = false
@@ -54,6 +59,7 @@ final class AppModel: ObservableObject {
   private var incomingMessagesTask: Task<Void, Never>?
   private var outboxSendingTask: Task<Void, Never>?
   private var trafficTask: Task<Void, Never>?
+  private var gnssPollingTask: Task<Void, Never>?
   private var trafficSampler = NetworkTrafficSampler()
   private var refreshInProgress = false
   private var pendingForegroundRefresh = false
@@ -97,6 +103,14 @@ final class AppModel: ObservableObject {
   ]
 
   var unreadCount: Int { messages.filter { !$0.isRead }.count }
+
+  var gnssStatusText: String {
+    if isGNSSBusy { return "正在处理" }
+    if isGNSSActive {
+      return gnssLocation == nil ? "正在搜索卫星" : "已定位"
+    }
+    return gnssLocation == nil ? "未启动" : "已停止"
+  }
 
   init(
     menuBarStatus: MenuBarStatusModel? = nil,
@@ -208,6 +222,14 @@ final class AppModel: ObservableObject {
     incomingMessagesTask = nil
     outboxSendingTask?.cancel()
     outboxSendingTask = nil
+    gnssPollingTask?.cancel()
+    gnssPollingTask = nil
+    let shouldStopGNSS = isGNSSActive && !isDemoMode
+    isGNSSActive = false
+    isGNSSBusy = false
+    if shouldStopGNSS, let service {
+      Task { try? await service.stopGNSS() }
+    }
     isSendingMessage = false
     sendingOutgoingMessageID = nil
     trafficTask?.cancel()
@@ -328,6 +350,115 @@ final class AppModel: ObservableObject {
       connection.cellularDetails = CellularDetails()
       connection.transportDescription = "等待 AT 通道"
       connection.issue = transportIssue
+    }
+  }
+
+  func startGNSS() {
+    guard
+      !isGNSSBusy,
+      !isGNSSActive,
+      connection.control != .unavailable
+    else { return }
+
+    gnssIssue = nil
+    isGNSSBusy = true
+
+    if isDemoMode {
+      gnssLocation = GNSSLocation(
+        latitude: 31.2304,
+        longitude: 121.4737,
+        horizontalDOP: 0.8,
+        altitudeMeters: 4.0,
+        fixMode: 3,
+        courseDegrees: 0,
+        speedKmh: 0,
+        speedKnots: 0,
+        utcTime: nil,
+        utcDate: nil,
+        satellites: 12
+      )
+      gnssLastUpdated = Date()
+      isGNSSActive = true
+      isGNSSBusy = false
+      return
+    }
+
+    guard let service else {
+      isGNSSBusy = false
+      gnssIssue = "AT 通道不可用"
+      return
+    }
+
+    Task { [weak self] in
+      do {
+        try await service.startGNSS()
+        guard let self else { return }
+        isGNSSActive = true
+        isGNSSBusy = false
+        startGNSSPolling()
+      } catch {
+        guard let self else { return }
+        isGNSSBusy = false
+        gnssIssue = error.localizedDescription
+      }
+    }
+  }
+
+  func stopGNSS() {
+    guard isGNSSActive, !isGNSSBusy else { return }
+    gnssPollingTask?.cancel()
+    gnssPollingTask = nil
+    isGNSSActive = false
+    isGNSSBusy = true
+
+    if isDemoMode {
+      isGNSSBusy = false
+      return
+    }
+
+    guard let service else {
+      isGNSSBusy = false
+      gnssIssue = "AT 通道不可用"
+      return
+    }
+
+    Task { [weak self] in
+      do {
+        try await service.stopGNSS()
+        guard let self else { return }
+        isGNSSBusy = false
+        gnssIssue = nil
+      } catch {
+        guard let self else { return }
+        isGNSSBusy = false
+        gnssIssue = error.localizedDescription
+      }
+    }
+  }
+
+  private func startGNSSPolling() {
+    gnssPollingTask?.cancel()
+    gnssPollingTask = Task { [weak self] in
+      while !Task.isCancelled {
+        guard let self, isGNSSActive else { return }
+        await refreshGNSSLocation()
+        try? await Task.sleep(for: .seconds(3))
+      }
+    }
+  }
+
+  private func refreshGNSSLocation() async {
+    guard isGNSSActive, let service else { return }
+    do {
+      if let location = try await service.queryGNSSLocation() {
+        gnssLocation = location
+        gnssLastUpdated = Date()
+        gnssIssue = nil
+      } else {
+        gnssIssue = "正在等待卫星定位，请将模块置于室外或靠近窗边。"
+      }
+    } catch {
+      gnssIssue = error.localizedDescription
     }
   }
 

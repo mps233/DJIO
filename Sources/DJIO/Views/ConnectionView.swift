@@ -1,3 +1,5 @@
+import Foundation
+import MapKit
 import SwiftUI
 
 struct ConnectionView: View {
@@ -69,6 +71,58 @@ struct ConnectionView: View {
         SignalMetricRow(title: "RSRQ", value: details.signalRSRQ.map(Double.init), unit: "dB")
         SignalMetricRow(title: "SINR", value: details.signalSINR, unit: "dB")
         ValueRow(title: "固件版本", value: details.firmwareRevision ?? "未知")
+      }
+
+      Section {
+        LabeledContent("状态", value: model.gnssStatusText)
+
+        if let location = model.gnssLocation {
+          GNSSMapPreview(location: location, isDemo: model.isDemoMode)
+            .frame(minHeight: 210)
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+
+          ValueRow(title: "纬度", value: String(format: "%.6f", location.latitude))
+          ValueRow(title: "经度", value: String(format: "%.6f", location.longitude))
+          if let altitude = location.altitudeMeters {
+            ValueRow(title: "海拔", value: String(format: "%.1f 米", altitude))
+          }
+          if let horizontalDOP = location.horizontalDOP {
+            ValueRow(title: "定位精度", value: String(format: "HDOP %.1f", horizontalDOP))
+          }
+          if let satellites = location.satellites {
+            ValueRow(title: "卫星", value: "\(satellites) 颗")
+          }
+        }
+
+        if let issue = model.gnssIssue, !issue.isEmpty {
+          Label(issue, systemImage: "location.slash")
+            .foregroundStyle(.orange)
+            .textSelection(.enabled)
+        }
+
+        Button {
+          if model.isGNSSActive {
+            model.stopGNSS()
+          } else {
+            model.startGNSS()
+          }
+        } label: {
+          Label(
+            model.isGNSSActive ? "停止定位" : "开始定位",
+            systemImage: model.isGNSSActive ? "location.slash" : "location"
+          )
+        }
+        .buttonStyle(.borderedProminent)
+        .disabled(gnssActionIsDisabled)
+      } header: {
+        Text("定位")
+      } footer: {
+        VStack(alignment: .leading, spacing: 5) {
+          Text("定位只在点击开始后启用；首次定位可能需要更长时间。")
+          if let updated = model.gnssLastUpdated {
+            Text("上次定位：\(updated.formatted(date: .abbreviated, time: .standard))")
+          }
+        }
       }
 
       Section {
@@ -144,6 +198,12 @@ struct ConnectionView: View {
   private var modemConfigurationActionIsDisabled: Bool {
     model.isSwitchingMode || model.isRefreshing || model.isSendingMessage
       || model.connection.control == .unavailable
+  }
+
+  private var gnssActionIsDisabled: Bool {
+    model.isGNSSBusy
+      || model.isSwitchingMode
+      || (!model.isDemoMode && model.connection.control == .unavailable)
   }
 
   private var details: CellularDetails {
@@ -265,6 +325,39 @@ struct ConnectionView: View {
           Text("上次更新：\(updated.formatted(date: .abbreviated, time: .standard))")
         }
       }
+    }
+  }
+}
+
+private struct GNSSMapPreview: View {
+  let location: GNSSLocation
+  let isDemo: Bool
+
+  private var coordinate: CLLocationCoordinate2D {
+    CLLocationCoordinate2D(latitude: location.latitude, longitude: location.longitude)
+  }
+
+  var body: some View {
+    Map(
+      initialPosition: .region(
+        MKCoordinateRegion(
+          center: coordinate,
+          latitudinalMeters: 1_200,
+          longitudinalMeters: 1_200
+        )
+      )
+    ) {
+      Marker("DJIO", coordinate: coordinate)
+        .tint(.blue)
+    }
+    .mapControlVisibility(.hidden)
+    .overlay(alignment: .topLeading) {
+      Label(isDemo ? "演示定位" : "当前位置", systemImage: "location.fill")
+        .font(.caption.weight(.semibold))
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(.regularMaterial, in: Capsule())
+        .padding(10)
     }
   }
 }
