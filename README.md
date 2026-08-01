@@ -38,7 +38,7 @@ VoWiFi/IMS 通话。
 ![DJIO eSIM 管理页面](docs/screenshots/esim.png)
 
 <p>
-  <img src="docs/screenshots/add-esim.png" width="540" alt="DJIO 添加 eSIM 窗口">
+  <img src="docs/screenshots/add-esim-window.png" width="540" alt="DJIO 添加 eSIM 窗口">
 </p>
 
 ### 短信
